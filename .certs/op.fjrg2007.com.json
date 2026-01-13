@@ -1,0 +1,9 @@
+{
+  "domains": [
+    "op.fjrg2007.com",
+    "*.op.fjrg2007.com"
+  ],
+  "expiresAt": "2027-01-13T12:56:46.006Z",
+  "issuedAt": "2026-01-13T12:56:46.006Z",
+  "selfSigned": true
+}
