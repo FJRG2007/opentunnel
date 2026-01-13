@@ -1,0 +1,17 @@
+.claude
+.env
+.env.local
+.env.*.local
+node_modules/
+dist/
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+*.tgz
+.idea/
+.vscode/
+*.swp
+*.swo
+coverage/
+.nyc_output/
