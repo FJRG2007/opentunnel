@@ -15,4 +15,4 @@ Thumbs.db
 *.swp
 *.swo
 coverage/
-.nyc_output/
+.nyc_output/tmpclaude-*
