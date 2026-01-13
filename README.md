@@ -97,7 +97,7 @@ tunnels: []  # VPS only runs the server
 version: "1.0"
 
 server:
-  url: wss://op.yourdomain.com/_tunnel  # Connect to VPS
+  remote: op.yourdomain.com  # Connect to remote server
 
 tunnels:
   - name: web
@@ -184,36 +184,57 @@ Result:
 
 ## Full Configuration
 
-**opentunnel.yml:**
+OpenTunnel automatically detects the mode based on your configuration:
+- **`domain`**: Runs local server + tunnels (all-in-one)
+- **`remote`**: Connects to a remote server (client only)
+
+### Local Mode (domain)
+Starts the server locally and connects tunnels to it.
 ```yaml
 version: "1.0"
 
 server:
+  domain: localhost      # Or your public domain if exposed
   port: 443              # Server port (default: 443)
-  domain: yourdomain.com # Base domain
   basePath: op           # Subdomain prefix (default: op)
   https: true            # Enable HTTPS (default: true)
   tcpPortMin: 10000      # Minimum TCP port (default: 10000)
   tcpPortMax: 20000      # Maximum TCP port (default: 20000)
   token: secret          # Authentication token (optional)
 
-  # To connect to a remote server:
-  # url: wss://server.com/_tunnel
-
 tunnels:
-  # HTTP Tunnel
   - name: web
     protocol: http
     port: 3000
     subdomain: web
-    host: localhost      # (default: localhost)
-    autostart: true      # (default: true)
 
-  # TCP Tunnel (databases, etc.)
+  - name: minecraft
+    protocol: tcp
+    port: 25565
+    subdomain: mc
+```
+
+### Remote Mode (remote)
+Connects to an existing remote server.
+```yaml
+version: "1.0"
+
+server:
+  remote: op.fjrg2007.com  # Remote server address
+  token: secret            # Must match server's token if set
+
+tunnels:
+  - name: web
+    protocol: http
+    port: 3000
+    subdomain: web
+    host: localhost        # (default: localhost)
+    autostart: true        # (default: true)
+
   - name: postgres
     protocol: tcp
     port: 5432
-    remotePort: 15432    # Public TCP port
+    remotePort: 15432      # Public TCP port
     autostart: false
 ```
 

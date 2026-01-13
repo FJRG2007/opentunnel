@@ -2,10 +2,14 @@ import * as acme from "acme-client";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 import * as http from "http";
 import * as forge from "node-forge";
 import Cloudflare from "cloudflare";
 import { Logger } from "../shared/utils";
+
+// Fixed path for certificates: ~/.opentunnel/certs
+const DEFAULT_CERTS_DIR = path.join(os.homedir(), ".opentunnel", "certs");
 
 interface CertificateInfo {
     cert: string;
@@ -42,7 +46,7 @@ export class CertManager {
         production?: boolean;
         cloudflareToken?: string;
     }) {
-        this.certsDir = options.certsDir || path.join(process.cwd(), ".certs");
+        this.certsDir = options.certsDir || DEFAULT_CERTS_DIR;
         this.email = options.email || "admin@localhost";
         this.isProduction = options.production ?? false;
         this.logger = new Logger("CertManager");

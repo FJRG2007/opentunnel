@@ -24,14 +24,14 @@ interface TunnelConfigYaml {
 interface OpenTunnelConfig {
     version: string;
     server?: {
+        domain?: string;   // Run local server with this domain
+        remote?: string;   // Connect to remote server (e.g., "op.fjrg2007.com")
         port?: number;
-        domain?: string;
         basePath?: string;
         https?: boolean;
         token?: string;
         tcpPortMin?: number;
         tcpPortMax?: number;
-        url?: string; // Direct WebSocket URL (for connecting to remote servers)
     };
     tunnels: TunnelConfigYaml[];
 }
@@ -690,7 +690,7 @@ program
    On your server, run:
 
    ${chalk.cyan("# Clone and install")}
-   git clone https://github.com/your-repo/opentunnel.git
+   git clone https://github.com/FJRG2007/opentunnel.git
    cd opentunnel
    npm install && npm run build
 
@@ -804,7 +804,7 @@ program
 `);
 
         console.log(chalk.gray("─".repeat(78)));
-        console.log(chalk.green("\nNeed help? https://github.com/your-repo/opentunnel/issues\n"));
+        console.log(chalk.green("\nNeed help? https://github.com/FJRG2007/opentunnel/issues\n"));
     });
 
 // Init command - create example config
@@ -827,7 +827,8 @@ program
         const exampleConfig: OpenTunnelConfig = {
             version: "1.0",
             server: {
-                url: "ws://localhost:8080/_tunnel",
+                domain: "localhost",
+                // remote: "op.fjrg2007.com",  // Use this to connect to a remote server
                 // token: "your-auth-token",
             },
             tunnels: [
@@ -871,7 +872,6 @@ program
     .action(async (options) => {
         const fs = await import("fs");
         const path = await import("path");
-        const { TunnelServer } = await import("../server/TunnelServer");
 
         // Load config file
         const configPath = path.join(process.cwd(), options.file);
@@ -890,14 +890,6 @@ program
             ? config.tunnels
             : config.tunnels?.filter(t => t.autostart !== false) || [];
 
-        // Get server config from yml
-        const port = config.server?.port || 443;
-        const domain = config.server?.domain || "localhost";
-        const basePath = config.server?.basePath || "op";
-        const useHttps = config.server?.https !== false;
-        const tcpMin = config.server?.tcpPortMin || 10000;
-        const tcpMax = config.server?.tcpPortMax || 20000;
-
         // Display banner
         console.log(chalk.cyan(`
  ██████╗ ██████╗ ███████╗███╗   ██╗████████╗██╗   ██╗███╗   ██╗███╗   ██╗███████╗██╗
@@ -908,47 +900,99 @@ program
  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚══════╝
 `));
 
-        // Start server
-        const spinner = ora("Starting server...").start();
+        // Get config values
+        const domain = config.server?.domain;
+        const remote = config.server?.remote;  // New: connect to remote server
+        const basePath = config.server?.basePath || "op";
+        const port = config.server?.port || 443;
+        const useHttps = config.server?.https !== false;
+        const hasTunnels = tunnelsToStart.length > 0;
 
-        const server = new TunnelServer({
-            port,
-            host: "0.0.0.0",
-            domain,
-            basePath,
-            tunnelPortRange: {
-                min: tcpMin,
-                max: tcpMax,
-            },
-            selfSignedHttps: useHttps ? { enabled: true } : undefined,
-        });
+        // Mode detection:
+        // - "remote" specified -> client mode (connect to remote server)
+        // - "domain" specified -> server mode (start local server + tunnels)
+        const isClientMode = !!remote && hasTunnels;
+        const isServerMode = !!domain;
 
-        try {
-            await server.start();
-            spinner.succeed(`Server running on https://${basePath}.${domain}:${port}`);
-
-            // Start tunnels if defined
-            if (tunnelsToStart.length > 0) {
-                console.log(chalk.cyan(`\nStarting ${tunnelsToStart.length} tunnel(s)...\n`));
-
-                const protocol = useHttps ? "wss" : "ws";
-                const serverUrl = `${protocol}://localhost:${port}/_tunnel`;
-
-                // Small delay to ensure server is fully ready
-                await new Promise(resolve => setTimeout(resolve, 500));
-
-                await startTunnelsFromConfig(tunnelsToStart, serverUrl, config.server?.token, true);
-            } else {
-                console.log(chalk.yellow("\nNo tunnels defined in config"));
-            }
-
-            console.log(chalk.gray("\nPress Ctrl+C to stop"));
-
-            // Keep running
-            await new Promise(() => {});
-        } catch (error: any) {
-            spinner.fail(`Failed to start: ${error.message}`);
+        if (!domain && !remote) {
+            console.log(chalk.red("Missing configuration."));
+            console.log(chalk.gray("\nAdd to your config:"));
+            console.log(chalk.cyan("\n  # Run your own server:"));
+            console.log(chalk.white("  server:"));
+            console.log(chalk.white("    domain: localhost"));
+            console.log(chalk.cyan("\n  # Or connect to a remote server:"));
+            console.log(chalk.white("  server:"));
+            console.log(chalk.white("    remote: op.fjrg2007.com"));
             process.exit(1);
+        }
+
+        if (isClientMode) {
+            // CLIENT MODE: Connect to remote server
+            const protocol = useHttps ? "wss" : "ws";
+            const serverUrl = `${protocol}://${remote}/_tunnel`;
+
+            console.log(chalk.cyan(`Connecting to ${remote}...\n`));
+            console.log(chalk.cyan(`Starting ${tunnelsToStart.length} tunnel(s)...\n`));
+
+            try {
+                await startTunnelsFromConfig(tunnelsToStart, serverUrl, config.server?.token, true);
+
+                console.log(chalk.gray("\nPress Ctrl+C to stop"));
+
+                // Keep running
+                await new Promise(() => {});
+            } catch (error: any) {
+                console.log(chalk.red(`Failed to connect: ${error.message}`));
+                process.exit(1);
+            }
+        } else if (isServerMode) {
+            // SERVER MODE: Start local server (always when domain is specified)
+            const { TunnelServer } = await import("../server/TunnelServer");
+
+            const tcpMin = config.server?.tcpPortMin || 10000;
+            const tcpMax = config.server?.tcpPortMax || 20000;
+
+            const spinner = ora("Starting server...").start();
+
+            const server = new TunnelServer({
+                port,
+                host: "0.0.0.0",
+                domain,
+                basePath,
+                tunnelPortRange: {
+                    min: tcpMin,
+                    max: tcpMax,
+                },
+                selfSignedHttps: useHttps ? { enabled: true } : undefined,
+            });
+
+            try {
+                await server.start();
+                spinner.succeed(`Server running on https://${basePath}.${domain}:${port}`);
+
+                // Start tunnels if defined
+                if (hasTunnels) {
+                    console.log(chalk.cyan(`\nStarting ${tunnelsToStart.length} tunnel(s)...\n`));
+
+                    const wsProtocol = useHttps ? "wss" : "ws";
+                    const serverUrl = `${wsProtocol}://localhost:${port}/_tunnel`;
+
+                    // Small delay to ensure server is fully ready
+                    await new Promise(resolve => setTimeout(resolve, 500));
+
+                    await startTunnelsFromConfig(tunnelsToStart, serverUrl, config.server?.token, true);
+                } else {
+                    console.log(chalk.gray("\nServer ready. No tunnels defined."));
+                }
+
+                console.log(chalk.gray("\nPress Ctrl+C to stop"));
+
+                // Keep running
+                await new Promise(() => {});
+            } catch (error: any) {
+                spinner.fail(`Failed to start: ${error.message}`);
+                process.exit(1);
+            }
         }
     });
 
