@@ -1,5 +1,6 @@
 .claude
 .env
+.certs
 .env.local
 .env.*.local
 node_modules/

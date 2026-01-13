@@ -49,26 +49,18 @@ program
 program
     .command("http <port>")
     .description("Expose a local HTTP server")
-    .option("-s, --server <url>", "Server URL (use 'ngrok' for ngrok)")
-    .option("-t, --token <token>", "Authentication token (or ngrok authtoken)")
+    .option("-s, --server <url>", "Remote server URL (if not provided, starts local server)")
+    .option("-t, --token <token>", "Authentication token")
     .option("-n, --subdomain <name>", "Custom subdomain (e.g., 'myapp' for myapp.op.domain.com)")
     .option("-d, --detach", "Run tunnel in background")
     .option("-h, --host <host>", "Local host", "localhost")
-    .option("--domain <domain>", "Server domain (e.g., domain.com)")
+    .option("--domain <domain>", "Domain for the tunnel", "localhost")
+    .option("--port <port>", "Server port", "443")
+    .option("--base-path <path>", "Subdomain base path", "op")
     .option("--https", "Use HTTPS for local connection")
-    .option("--insecure", "Skip SSL certificate verification (for self-signed certs)")
     .option("--ngrok", "Use ngrok instead of OpenTunnel server")
     .option("--region <region>", "Ngrok region (us, eu, ap, au, sa, jp, in)", "us")
     .action(async (port: string, options) => {
-        // Build server URL from domain if provided
-        const serverUrl = options.server || (options.domain
-            ? `wss://${options.domain}/_tunnel`
-            : "ws://localhost:8080/_tunnel");
-
-        if (options.detach) {
-            await runTunnelInBackground("http", port, { ...options, server: serverUrl });
-            return;
-        }
         if (options.ngrok || options.server === "ngrok") {
             await createNgrokTunnel({
                 protocol: options.https ? "https" : "http",
@@ -78,16 +70,74 @@ program
                 authtoken: options.token,
                 region: options.region,
             });
-        } else {
+            return;
+        }
+
+        // If remote server URL provided, just connect to it
+        if (options.server) {
             await createTunnel({
                 protocol: options.https ? "https" : "http",
                 localHost: options.host,
                 localPort: parseInt(port),
                 subdomain: options.subdomain,
+                serverUrl: options.server,
+                token: options.token,
+                insecure: true,
+            });
+            return;
+        }
+
+        // Start local server + tunnel (all-in-one)
+        const { TunnelServer } = await import("../server/TunnelServer");
+
+        const serverPort = parseInt(options.port);
+        const domain = options.domain;
+        const basePath = options.basePath;
+        const subdomain = options.subdomain || "app";
+
+        console.log(chalk.cyan(`
+ ██████╗ ██████╗ ███████╗███╗   ██╗████████╗██╗   ██╗███╗   ██╗███╗   ██╗███████╗██╗
+██╔═══██╗██╔══██╗██╔════╝████╗  ██║╚══██╔══╝██║   ██║████╗  ██║████╗  ██║██╔════╝██║
+██║   ██║██████╔╝█████╗  ██╔██╗ ██║   ██║   ██║   ██║██╔██╗ ██║██╔██╗ ██║█████╗  ██║
+██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║   ██║   ██║   ██║██║╚██╗██║██║╚██╗██║██╔══╝  ██║
+╚██████╔╝██║     ███████╗██║ ╚████║   ██║   ╚██████╔╝██║ ╚████║██║ ╚████║███████╗███████╗
+ ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚══════╝
+`));
+
+        const spinner = ora("Starting server...").start();
+
+        const server = new TunnelServer({
+            port: serverPort,
+            host: "0.0.0.0",
+            domain,
+            basePath,
+            tunnelPortRange: { min: 10000, max: 20000 },
+            selfSignedHttps: { enabled: true },
+        });
+
+        try {
+            await server.start();
+            spinner.succeed(`Server running on port ${serverPort}`);
+
+            // Connect tunnel
+            const tunnelSpinner = ora("Creating tunnel...").start();
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            const serverUrl = `wss://localhost:${serverPort}/_tunnel`;
+
+            await createTunnel({
+                protocol: options.https ? "https" : "http",
+                localHost: options.host,
+                localPort: parseInt(port),
+                subdomain,
                 serverUrl,
                 token: options.token,
-                insecure: options.insecure,
+                insecure: true,
             });
+
+        } catch (error: any) {
+            spinner.fail(`Failed: ${error.message}`);
+            process.exit(1);
         }
     });
 
@@ -95,24 +145,15 @@ program
 program
     .command("tcp <port>")
     .description("Expose a local TCP server")
-    .option("-s, --server <url>", "Server URL (use 'ngrok' for ngrok)")
-    .option("-t, --token <token>", "Authentication token (or ngrok authtoken)")
+    .option("-s, --server <url>", "Remote server URL (if not provided, starts local server)")
+    .option("-t, --token <token>", "Authentication token")
     .option("-r, --remote-port <port>", "Remote port to use")
     .option("-h, --host <host>", "Local host", "localhost")
-    .option("-d, --detach", "Run tunnel in background")
-    .option("--domain <domain>", "Server domain (e.g., domain.com)")
-    .option("--insecure", "Skip SSL certificate verification (for self-signed certs)")
+    .option("--domain <domain>", "Domain for the tunnel", "localhost")
+    .option("--port <port>", "Server port", "443")
     .option("--ngrok", "Use ngrok instead of OpenTunnel server")
     .option("--region <region>", "Ngrok region (us, eu, ap, au, sa, jp, in)", "us")
     .action(async (port: string, options) => {
-        const serverUrl = options.server || (options.domain
-            ? `wss://${options.domain}/_tunnel`
-            : "ws://localhost:8080/_tunnel");
-
-        if (options.detach) {
-            await runTunnelInBackground("tcp", port, { ...options, server: serverUrl });
-            return;
-        }
         if (options.ngrok || options.server === "ngrok") {
             await createNgrokTunnel({
                 protocol: "tcp",
@@ -122,7 +163,58 @@ program
                 authtoken: options.token,
                 region: options.region,
             });
-        } else {
+            return;
+        }
+
+        // If remote server URL provided, just connect to it
+        if (options.server) {
+            await createTunnel({
+                protocol: "tcp",
+                localHost: options.host,
+                localPort: parseInt(port),
+                remotePort: options.remotePort ? parseInt(options.remotePort) : undefined,
+                serverUrl: options.server,
+                token: options.token,
+                insecure: true,
+            });
+            return;
+        }
+
+        // Start local server + tunnel (all-in-one)
+        const { TunnelServer } = await import("../server/TunnelServer");
+
+        const serverPort = parseInt(options.port);
+        const domain = options.domain;
+
+        console.log(chalk.cyan(`
+ ██████╗ ██████╗ ███████╗███╗   ██╗████████╗██╗   ██╗███╗   ██╗███╗   ██╗███████╗██╗
+██╔═══██╗██╔══██╗██╔════╝████╗  ██║╚══██╔══╝██║   ██║████╗  ██║████╗  ██║██╔════╝██║
+██║   ██║██████╔╝█████╗  ██╔██╗ ██║   ██║   ██║   ██║██╔██╗ ██║██╔██╗ ██║█████╗  ██║
+██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║   ██║   ██║   ██║██║╚██╗██║██║╚██╗██║██╔══╝  ██║
+╚██████╔╝██║     ███████╗██║ ╚████║   ██║   ╚██████╔╝██║ ╚████║██║ ╚████║███████╗███████╗
+ ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚══════╝
+`));
+
+        const spinner = ora("Starting server...").start();
+
+        const server = new TunnelServer({
+            port: serverPort,
+            host: "0.0.0.0",
+            domain,
+            basePath: "op",
+            tunnelPortRange: { min: 10000, max: 20000 },
+            selfSignedHttps: { enabled: true },
+        });
+
+        try {
+            await server.start();
+            spinner.succeed(`Server running on port ${serverPort}`);
+
+            const tunnelSpinner = ora("Creating TCP tunnel...").start();
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            const serverUrl = `wss://localhost:${serverPort}/_tunnel`;
+
             await createTunnel({
                 protocol: "tcp",
                 localHost: options.host,
@@ -130,8 +222,12 @@ program
                 remotePort: options.remotePort ? parseInt(options.remotePort) : undefined,
                 serverUrl,
                 token: options.token,
-                insecure: options.insecure,
+                insecure: true,
             });
+
+        } catch (error: any) {
+            spinner.fail(`Failed: ${error.message}`);
+            process.exit(1);
         }
     });
 
