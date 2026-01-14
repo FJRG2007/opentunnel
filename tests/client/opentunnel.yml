@@ -1,5 +1,3 @@
-version: "1.0"
-
 server:
   remote: ${SERVER_DOMAIN:-fjrg2007.com}  # Base domain only (system adds basePath)
   token: ${AUTH_TOKEN}                    # From .env (required for private servers)

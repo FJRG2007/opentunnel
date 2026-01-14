@@ -23,7 +23,6 @@ interface TunnelConfigYaml {
 }
 
 interface OpenTunnelConfig {
-    version: string;
     server?: {
         domain?: string;   // Run local server with this domain
         remote?: string;   // Connect to remote server (e.g., "op.fjrg2007.com")
@@ -34,7 +33,7 @@ interface OpenTunnelConfig {
         tcpPortMin?: number;
         tcpPortMax?: number;
     };
-    tunnels: TunnelConfigYaml[];
+    tunnels?: TunnelConfigYaml[];  // Optional: not needed for server-only mode
 }
 
 const CONFIG_FILE = "opentunnel.yml";
@@ -1052,20 +1051,16 @@ program
         // Example config with environment variable syntax
         const clientConfig = `# OpenTunnel Client Configuration
 # Supports environment variables: \${VAR} or \${VAR:-default}
-# Create a .env file for secrets (automatically loaded)
-
-version: "1.0"
 
 server:
   remote: \${SERVER_DOMAIN:-example.com}   # Server domain (system adds basePath)
-  token: \${AUTH_TOKEN}                     # From .env (required for private servers)
+  token: \${AUTH_TOKEN}                     # From .env (optional)
 
 tunnels:
   - name: web
     protocol: http
     port: 3000
     subdomain: web                          # → web.op.example.com
-    autostart: true
 
   - name: api
     protocol: http
@@ -1076,20 +1071,17 @@ tunnels:
     protocol: tcp
     port: 5432
     remotePort: 15432                       # → example.com:15432
-    autostart: false
+    autostart: false                        # Don't start automatically
 `;
 
         const serverConfig = `# OpenTunnel Server Configuration
 # Supports environment variables: \${VAR} or \${VAR:-default}
-# Create a .env file for secrets (automatically loaded)
-
-version: "1.0"
 
 server:
   domain: \${DOMAIN:-example.com}           # Your base domain
   token: \${AUTH_TOKEN}                     # From .env (optional for public server)
-
-tunnels: []
+  # tcpPortMin: 10000                       # TCP tunnel port range (optional)
+  # tcpPortMax: 20000
 `;
 
         const envExample = `# OpenTunnel Environment Variables
@@ -1122,10 +1114,10 @@ AUTH_TOKEN=
         console.log(chalk.cyan(`  opentunnel up -d   # Start in background`));
     });
 
-// Up command - start tunnels from config (like docker-compose up)
+// Up command - start tunnels from config
 program
     .command("up")
-    .description("Start server and tunnels from opentunnel.yml (like docker-compose up)")
+    .description("Start server and tunnels from opentunnel.yml")
     .option("-d, --detach", "Run in background (detached mode)")
     .option("-f, --file <path>", "Config file path", CONFIG_FILE)
     .option("--no-autostart", "Ignore autostart setting, start all tunnels")
@@ -1144,8 +1136,8 @@ program
         }
 
         const tunnelsToStart = options.autostart === false
-            ? config.tunnels
-            : config.tunnels?.filter(t => t.autostart !== false) || [];
+            ? (config.tunnels || [])
+            : (config.tunnels?.filter(t => t.autostart !== false) || []);
 
         // Display banner
         console.log(chalk.cyan(`
@@ -1253,10 +1245,10 @@ program
         }
     });
 
-// Down command - stop all tunnels (like docker-compose down)
+// Down command - stop all tunnels
 program
     .command("down")
-    .description("Stop all running tunnels (like docker-compose down)")
+    .description("Stop all running tunnels")
     .action(async () => {
         const fs = await import("fs");
         const path = await import("path");
@@ -1308,10 +1300,10 @@ program
         console.log(chalk.green("\nAll tunnels stopped"));
     });
 
-// PS command - list running tunnel processes (like docker ps)
+// PS command - list running tunnel processes
 program
     .command("ps")
-    .description("List running tunnel processes (like docker ps)")
+    .description("List running tunnel processes")
     .action(async () => {
         const fs = await import("fs");
         const path = await import("path");

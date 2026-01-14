@@ -1,6 +1,6 @@
 {
     "name": "opentunnel-cli",
-    "version": "1.0.7",
+    "version": "1.0.8",
     "description": "Self-hosted tunnel solution to expose local ports to the internet via custom domains",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",

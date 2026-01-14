@@ -77,12 +77,9 @@ opentunnel tcp 5432 -s example.com -r 15432
 Create `opentunnel.yml`:
 
 ```yaml
-version: "1.0"
-
 server:
   remote: example.com             # Base domain (system adds basePath)
-  # basePath: op                  # Optional: defaults to "op", empty for direct domain
-  token: your-secret-token        # Optional: authentication token
+  token: ${AUTH_TOKEN}            # From .env file (optional)
 
 tunnels:
   - name: web
@@ -160,18 +157,11 @@ opentunnel stop
 Create `opentunnel.yml`:
 
 ```yaml
-version: "1.0"
-
 server:
   domain: example.com             # Base domain only
-  # basePath: op                  # Optional: defaults to "op"
-  port: 443
-  https: true
-  tcpPortMin: 10000
-  tcpPortMax: 20000
   # token: SECRET123              # Uncomment for private server
-
-tunnels: []
+  # tcpPortMin: 10000             # TCP tunnel port range (optional)
+  # tcpPortMax: 20000
 ```
 
 ```bash
@@ -345,8 +335,6 @@ SERVER_DOMAIN=example.com
 
 ```yaml
 # opentunnel.yml
-version: "1.0"
-
 server:
   remote: ${SERVER_DOMAIN:-localhost}    # Uses example.com from .env
   token: ${AUTH_TOKEN}                   # Uses my-secret-token from .env
@@ -361,19 +349,15 @@ tunnels:
 ## Client Mode (connect to remote server)
 
 ```yaml
-version: "1.0"
-
 server:
   remote: ${SERVER_DOMAIN:-example.com}  # Base domain (system adds basePath)
-  # basePath: op                         # Optional: defaults to "op"
-  token: ${AUTH_TOKEN}                   # From .env or environment
+  token: ${AUTH_TOKEN}                   # From .env (optional)
 
 tunnels:
   - name: frontend
     protocol: http
     port: 3000
     subdomain: app                       # → app.op.example.com
-    autostart: true
 
   - name: backend
     protocol: http
@@ -384,19 +368,17 @@ tunnels:
     protocol: tcp
     port: 5432
     remotePort: 15432                    # → example.com:15432
-    autostart: false
+    autostart: false                     # Don't start automatically
 ```
 
 ## Server Mode (run your own server)
 
 ```yaml
-version: "1.0"
-
 server:
   domain: ${DOMAIN:-example.com}         # Base domain only
   token: ${AUTH_TOKEN}                   # Optional: for private server
-
-tunnels: []
+  # tcpPortMin: 10000                    # TCP tunnel port range (optional)
+  # tcpPortMax: 20000
 ```
 
 ## Commands
