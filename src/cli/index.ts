@@ -46,27 +46,37 @@ program
     .description("Expose local ports to the internet via custom domains or ngrok")
     .version("1.0.0");
 
+// Helper function to build WebSocket URL from hostname
+function buildServerUrl(server: string, insecure: boolean): { url: string; displayName: string } {
+    let hostname = server;
+
+    // Remove protocol if provided
+    hostname = hostname.replace(/^(wss?|https?):\/\//, "");
+    // Remove trailing path
+    hostname = hostname.replace(/\/_tunnel.*$/, "");
+    // Remove trailing slash
+    hostname = hostname.replace(/\/$/, "");
+
+    const protocol = insecure ? "ws" : "wss";
+    return {
+        url: `${protocol}://${hostname}/_tunnel`,
+        displayName: hostname,
+    };
+}
+
 // Quick command - quick tunnel to any server
 program
     .command("quick <port>")
     .description("Instantly expose a local port to the internet")
-    .requiredOption("-s, --server <url>", "Server URL (e.g., wss://op.example.com/_tunnel)")
+    .requiredOption("-s, --server <host>", "Server hostname (e.g., op.example.com)")
     .option("-n, --subdomain <name>", "Request a specific subdomain (e.g., 'myapp')")
     .option("-p, --protocol <proto>", "Protocol (http, https, tcp)", "http")
     .option("-h, --host <host>", "Local host to forward to", "localhost")
     .option("-t, --token <token>", "Authentication token (if server requires it)")
     .option("--insecure", "Skip SSL certificate verification (for self-signed certs)")
     .action(async (port: string, options) => {
-        // Determine server display name
-        const serverUrl = options.server;
-        let serverDisplayName = serverUrl;
-
-        try {
-            const url = new URL(serverUrl.replace("wss://", "https://").replace("ws://", "http://"));
-            serverDisplayName = url.hostname;
-        } catch {
-            // Keep original if parsing fails
-        }
+        // Build server URL from hostname
+        const { url: serverUrl, displayName: serverDisplayName } = buildServerUrl(options.server, options.insecure);
 
         console.log(chalk.cyan(`
  ██████╗ ██████╗ ███████╗███╗   ██╗████████╗██╗   ██╗███╗   ██╗███╗   ██╗███████╗██╗
@@ -159,7 +169,7 @@ program
 program
     .command("http <port>")
     .description("Expose a local HTTP server")
-    .option("-s, --server <url>", "Remote server URL (if not provided, starts local server)")
+    .option("-s, --server <host>", "Remote server hostname (if not provided, starts local server)")
     .option("-t, --token <token>", "Authentication token")
     .option("-n, --subdomain <name>", "Custom subdomain (e.g., 'myapp' for myapp.op.domain.com)")
     .option("-d, --detach", "Run tunnel in background")
@@ -168,6 +178,7 @@ program
     .option("--port <port>", "Server port", "443")
     .option("--base-path <path>", "Subdomain base path", "op")
     .option("--https", "Use HTTPS for local connection")
+    .option("--insecure", "Skip SSL verification (for self-signed certs)")
     .option("--ngrok", "Use ngrok instead of OpenTunnel server")
     .option("--region <region>", "Ngrok region (us, eu, ap, au, sa, jp, in)", "us")
     .action(async (port: string, options) => {
@@ -183,16 +194,17 @@ program
             return;
         }
 
-        // If remote server URL provided, just connect to it
+        // If remote server hostname provided, just connect to it
         if (options.server) {
+            const { url: serverUrl } = buildServerUrl(options.server, options.insecure);
             await createTunnel({
                 protocol: options.https ? "https" : "http",
                 localHost: options.host,
                 localPort: parseInt(port),
                 subdomain: options.subdomain,
-                serverUrl: options.server,
+                serverUrl,
                 token: options.token,
-                insecure: true,
+                insecure: options.insecure,
             });
             return;
         }
@@ -255,12 +267,13 @@ program
 program
     .command("tcp <port>")
     .description("Expose a local TCP server")
-    .option("-s, --server <url>", "Remote server URL (if not provided, starts local server)")
+    .option("-s, --server <host>", "Remote server hostname (if not provided, starts local server)")
     .option("-t, --token <token>", "Authentication token")
     .option("-r, --remote-port <port>", "Remote port to use")
     .option("-h, --host <host>", "Local host", "localhost")
     .option("--domain <domain>", "Domain for the tunnel", "localhost")
     .option("--port <port>", "Server port", "443")
+    .option("--insecure", "Skip SSL verification (for self-signed certs)")
     .option("--ngrok", "Use ngrok instead of OpenTunnel server")
     .option("--region <region>", "Ngrok region (us, eu, ap, au, sa, jp, in)", "us")
     .action(async (port: string, options) => {
@@ -276,16 +289,17 @@ program
             return;
         }
 
-        // If remote server URL provided, just connect to it
+        // If remote server hostname provided, just connect to it
         if (options.server) {
+            const { url: serverUrl } = buildServerUrl(options.server, options.insecure);
             await createTunnel({
                 protocol: "tcp",
                 localHost: options.host,
                 localPort: parseInt(port),
                 remotePort: options.remotePort ? parseInt(options.remotePort) : undefined,
-                serverUrl: options.server,
+                serverUrl,
                 token: options.token,
-                insecure: true,
+                insecure: options.insecure,
             });
             return;
         }

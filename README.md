@@ -25,7 +25,7 @@ Use OpenTunnel to expose your local services to the internet. Connect to any Ope
 npm install -g opentunnel-cli
 
 # Or use without installing
-npx opentunnel-cli quick 3000 -s wss://op.example.com/_tunnel
+npx opentunnel-cli quick 3000 -s op.example.com
 ```
 
 ## Quick Start
@@ -35,7 +35,7 @@ npx opentunnel-cli quick 3000 -s wss://op.example.com/_tunnel
 The fastest way to expose a port:
 
 ```bash
-opentunnel quick 3000 -s wss://op.example.com/_tunnel
+opentunnel quick 3000 -s op.example.com
 ```
 
 Your local port 3000 is now accessible from the internet:
@@ -48,11 +48,11 @@ Your local port 3000 is now accessible from the internet:
 
 **Options:**
 ```bash
-opentunnel quick 3000 -s wss://op.example.com/_tunnel                # Basic HTTP tunnel
-opentunnel quick 3000 -s wss://op.example.com/_tunnel -n myapp       # Custom subdomain
-opentunnel quick 5432 -s wss://op.example.com/_tunnel -p tcp         # TCP tunnel
-opentunnel quick 3000 -s wss://op.example.com/_tunnel -t SECRET      # With auth token
-opentunnel quick 3000 -s wss://op.example.com/_tunnel --insecure     # Self-signed cert
+opentunnel quick 3000 -s op.example.com                # Basic HTTP tunnel
+opentunnel quick 3000 -s op.example.com -n myapp       # Custom subdomain
+opentunnel quick 5432 -s op.example.com -p tcp         # TCP tunnel
+opentunnel quick 3000 -s op.example.com -t SECRET      # With auth token
+opentunnel quick 3000 -s op.example.com --insecure     # Self-signed cert
 ```
 
 ### Option 2: HTTP/TCP Commands
@@ -61,13 +61,13 @@ More control with specific commands:
 
 ```bash
 # HTTP tunnel
-opentunnel http 3000 --server wss://op.example.com/_tunnel
+opentunnel http 3000 --server op.example.com
 
 # With authentication
-opentunnel http 3000 --server wss://op.example.com/_tunnel --token SECRET
+opentunnel http 3000 --server op.example.com --token SECRET
 
 # TCP tunnel
-opentunnel tcp 5432 --server wss://op.example.com/_tunnel --remote-port 15432
+opentunnel tcp 5432 --server op.example.com --remote-port 15432
 ```
 
 ### Option 3: Using Config File
@@ -142,14 +142,14 @@ Tunnels will be available at: `https://myapp.op.example.com`
 npm install -g opentunnel-cli
 
 # Start public server (anyone can connect)
-sudo opentunnel server --domain example.com --letsencrypt --email admin@example.com
+sudo opentunnel server -d --domain example.com --letsencrypt --email admin@example.com
 
 # Start private server (requires token to connect)
-sudo opentunnel server --domain example.com --letsencrypt --email admin@example.com --auth-tokens "SECRET123"
+sudo opentunnel server -d --domain example.com --letsencrypt --email admin@example.com --auth-tokens "SECRET123"
 
 # OR
 
-sudo opentunnel server --domain example.com --letsencrypt --email admin@example.com --auth-tokens "SECRET1,SECRET2"
+sudo opentunnel server -d --domain example.com --letsencrypt --email admin@example.com --auth-tokens "SECRET1,SECRET2"
 ```
 
 ### Option 2: Docker (Recommended for Production)
@@ -165,7 +165,7 @@ nano .env
 
 Edit `.env`:
 ```env
-DOMAIN=op.example.com
+DOMAIN=example.com              # Solo el dominio base (sin el prefijo op)
 AUTH_TOKENS=SECRET123           # Leave empty for public server
 LETSENCRYPT_EMAIL=admin@example.com
 LETSENCRYPT_PRODUCTION=true
@@ -194,11 +194,12 @@ sudo systemctl status opentunnel
 opentunnel server [options]
 
 Required:
-  --domain <domain>           Your domain (e.g., op.example.com)
+  --domain <domain>           Your base domain (e.g., example.com)
+                              Tunnels will be at: *.op.example.com
 
 Optional:
   -p, --port <port>           Server port (default: 443)
-  -b, --base-path <path>      Subdomain prefix (default: none)
+  -b, --base-path <path>      Subdomain prefix (default: op)
   --tcp-min <port>            Min TCP tunnel port (default: 10000)
   --tcp-max <port>            Max TCP tunnel port (default: 20000)
 
@@ -223,12 +224,12 @@ Other:
 Anyone can connect without authentication:
 
 ```bash
-opentunnel server --domain op.example.com --letsencrypt --email admin@example.com
+opentunnel server --domain example.com --letsencrypt --email admin@example.com
 ```
 
 Clients connect with:
 ```bash
-opentunnel quick 3000 --server wss://op.example.com/_tunnel
+opentunnel quick 3000 -s op.example.com
 ```
 
 ### Private Server
@@ -236,12 +237,12 @@ opentunnel quick 3000 --server wss://op.example.com/_tunnel
 Only clients with valid tokens can connect:
 
 ```bash
-opentunnel server --domain op.example.com --letsencrypt --email admin@example.com --auth-tokens "token1,token2,token3"
+opentunnel server --domain example.com --letsencrypt --email admin@example.com --auth-tokens "token1,token2,token3"
 ```
 
 Clients must provide a token:
 ```bash
-opentunnel quick 3000 --server wss://op.example.com/_tunnel --token token1
+opentunnel quick 3000 -s op.example.com --token token1
 ```
 
 ---
@@ -324,7 +325,8 @@ tunnels:
 version: "1.0"
 
 server:
-  domain: op.example.com
+  domain: example.com       # Solo el dominio base
+  basePath: op              # Prefijo → *.op.example.com
   port: 443
   https: true
   tcpPortMin: 10000
@@ -368,7 +370,7 @@ opentunnel ps         # Show running processes
 opentunnel quick <port> -s <server-url> [options]
 
 Required:
-  -s, --server <url>        Server URL (e.g., wss://op.example.com/_tunnel)
+  -s, --server <host>       Server hostname (e.g., op.example.com)
 
 Options:
   -n, --subdomain <name>    Request specific subdomain
@@ -385,7 +387,7 @@ opentunnel http <port> [options]
 opentunnel tcp <port> [options]
 
 Options:
-  -s, --server <url>        Server WebSocket URL
+  -s, --server <host>       Server hostname (e.g., op.example.com)
   -t, --token <token>       Authentication token
   -n, --subdomain <name>    Custom subdomain
   -h, --host <host>         Local host (default: localhost)

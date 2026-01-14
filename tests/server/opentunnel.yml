@@ -1,0 +1,12 @@
+version: "1.0"
+
+server:
+  domain: fjrg2007.com    # Solo el dominio base, sin el prefijo op
+  basePath: op            # El prefijo se añade automáticamente → *.op.fjrg2007.com
+  port: 443
+  https: true
+  tcpPortMin: 10000
+  tcpPortMax: 20000
+  token: your-secret-token
+
+tunnels: []  # Server-only, no local tunnels
