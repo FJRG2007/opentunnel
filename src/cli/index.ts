@@ -38,6 +38,70 @@ interface OpenTunnelConfig {
 }
 
 const CONFIG_FILE = "opentunnel.yml";
+
+// Load .env file if exists
+function loadEnvFile(): void {
+    const envPath = path.join(process.cwd(), ".env");
+    if (fs.existsSync(envPath)) {
+        const envContent = fs.readFileSync(envPath, "utf-8");
+        for (const line of envContent.split("\n")) {
+            const trimmed = line.trim();
+            // Skip comments and empty lines
+            if (!trimmed || trimmed.startsWith("#")) continue;
+
+            const match = trimmed.match(/^([^=]+)=(.*)$/);
+            if (match) {
+                const key = match[1].trim();
+                let value = match[2].trim();
+                // Remove surrounding quotes if present
+                if ((value.startsWith('"') && value.endsWith('"')) ||
+                    (value.startsWith("'") && value.endsWith("'"))) {
+                    value = value.slice(1, -1);
+                }
+                // Only set if not already defined in environment
+                if (process.env[key] === undefined) {
+                    process.env[key] = value;
+                }
+            }
+        }
+    }
+}
+
+// Docker-style environment variable substitution
+// Supports: ${VAR}, ${VAR:-default}, ${VAR:=default}
+function substituteEnvVars(content: string): string {
+    // Pattern matches ${VAR}, ${VAR:-default}, ${VAR:=default}
+    const pattern = /\$\{([^}:]+)(?:(:[-=])([^}]*))?\}/g;
+
+    return content.replace(pattern, (match, varName, operator, defaultValue) => {
+        const envValue = process.env[varName];
+
+        if (operator === ":-" || operator === ":=") {
+            // Use default if variable is unset or empty
+            return (envValue !== undefined && envValue !== "") ? envValue : (defaultValue || "");
+        }
+
+        // Just ${VAR} - return value or empty string
+        return envValue || "";
+    });
+}
+
+// Load and parse config file with environment variable substitution
+function loadConfig(configPath: string): OpenTunnelConfig | null {
+    if (!fs.existsSync(configPath)) {
+        return null;
+    }
+
+    // Load .env file first
+    loadEnvFile();
+
+    // Read and substitute environment variables
+    let content = fs.readFileSync(configPath, "utf-8");
+    content = substituteEnvVars(content);
+
+    return parseYaml(content) as OpenTunnelConfig;
+}
+
 const program = new Command();
 
 program
@@ -46,8 +110,9 @@ program
     .description("Expose local ports to the internet via custom domains or ngrok")
     .version("1.0.0");
 
-// Helper function to build WebSocket URL from hostname
-function buildServerUrl(server: string, insecure: boolean): { url: string; displayName: string } {
+// Helper function to build WebSocket URL from domain
+// User only provides base domain (e.g., fjrg2007.com), system handles the rest
+function buildServerUrl(server: string, insecure: boolean, basePath?: string): { url: string; displayName: string } {
     let hostname = server;
 
     // Remove protocol if provided
@@ -57,9 +122,15 @@ function buildServerUrl(server: string, insecure: boolean): { url: string; displ
     // Remove trailing slash
     hostname = hostname.replace(/\/$/, "");
 
+    // Build the full hostname with basePath if provided and not empty
+    // If basePath is "op" (default), connect to op.domain.com
+    // If basePath is empty or not provided, connect directly to domain.com
+    const effectiveBasePath = basePath || "op";
+    const fullHostname = effectiveBasePath ? `${effectiveBasePath}.${hostname}` : hostname;
+
     const protocol = insecure ? "ws" : "wss";
     return {
-        url: `${protocol}://${hostname}/_tunnel`,
+        url: `${protocol}://${fullHostname}/_tunnel`,
         displayName: hostname,
     };
 }
@@ -68,15 +139,16 @@ function buildServerUrl(server: string, insecure: boolean): { url: string; displ
 program
     .command("quick <port>")
     .description("Instantly expose a local port to the internet")
-    .requiredOption("-s, --server <host>", "Server hostname (e.g., op.example.com)")
+    .requiredOption("-s, --server <domain>", "Server domain (e.g., example.com)")
+    .option("-b, --base-path <path>", "Server base path (default: op)")
     .option("-n, --subdomain <name>", "Request a specific subdomain (e.g., 'myapp')")
     .option("-p, --protocol <proto>", "Protocol (http, https, tcp)", "http")
     .option("-h, --host <host>", "Local host to forward to", "localhost")
     .option("-t, --token <token>", "Authentication token (if server requires it)")
     .option("--insecure", "Skip SSL certificate verification (for self-signed certs)")
     .action(async (port: string, options) => {
-        // Build server URL from hostname
-        const { url: serverUrl, displayName: serverDisplayName } = buildServerUrl(options.server, options.insecure);
+        // Build server URL from domain (user provides domain, system adds basePath)
+        const { url: serverUrl, displayName: serverDisplayName } = buildServerUrl(options.server, options.insecure, options.basePath);
 
         console.log(chalk.cyan(`
  ██████╗ ██████╗ ███████╗███╗   ██╗████████╗██╗   ██╗███╗   ██╗███╗   ██╗███████╗██╗
@@ -169,14 +241,14 @@ program
 program
     .command("http <port>")
     .description("Expose a local HTTP server")
-    .option("-s, --server <host>", "Remote server hostname (if not provided, starts local server)")
+    .option("-s, --server <domain>", "Remote server domain (if not provided, starts local server)")
+    .option("-b, --base-path <path>", "Server base path (default: op)")
     .option("-t, --token <token>", "Authentication token")
     .option("-n, --subdomain <name>", "Custom subdomain (e.g., 'myapp' for myapp.op.domain.com)")
     .option("-d, --detach", "Run tunnel in background")
     .option("-h, --host <host>", "Local host", "localhost")
     .option("--domain <domain>", "Domain for the tunnel", "localhost")
     .option("--port <port>", "Server port", "443")
-    .option("--base-path <path>", "Subdomain base path", "op")
     .option("--https", "Use HTTPS for local connection")
     .option("--insecure", "Skip SSL verification (for self-signed certs)")
     .option("--ngrok", "Use ngrok instead of OpenTunnel server")
@@ -194,9 +266,9 @@ program
             return;
         }
 
-        // If remote server hostname provided, just connect to it
+        // If remote server domain provided, just connect to it
         if (options.server) {
-            const { url: serverUrl } = buildServerUrl(options.server, options.insecure);
+            const { url: serverUrl } = buildServerUrl(options.server, options.insecure, options.basePath);
             await createTunnel({
                 protocol: options.https ? "https" : "http",
                 localHost: options.host,
@@ -267,7 +339,8 @@ program
 program
     .command("tcp <port>")
     .description("Expose a local TCP server")
-    .option("-s, --server <host>", "Remote server hostname (if not provided, starts local server)")
+    .option("-s, --server <domain>", "Remote server domain (if not provided, starts local server)")
+    .option("-b, --base-path <path>", "Server base path (default: op)")
     .option("-t, --token <token>", "Authentication token")
     .option("-r, --remote-port <port>", "Remote port to use")
     .option("-h, --host <host>", "Local host", "localhost")
@@ -289,9 +362,9 @@ program
             return;
         }
 
-        // If remote server hostname provided, just connect to it
+        // If remote server domain provided, just connect to it
         if (options.server) {
-            const { url: serverUrl } = buildServerUrl(options.server, options.insecure);
+            const { url: serverUrl } = buildServerUrl(options.server, options.insecure, options.basePath);
             await createTunnel({
                 protocol: "tcp",
                 localHost: options.host,
@@ -401,13 +474,13 @@ program
 program
     .command("server")
     .description("Start the OpenTunnel server (standalone mode)")
-    .option("-p, --port <port>", "Server port", "443")
+    .option("-p, --port <port>", "Server port")
     .option("--public-port <port>", "Public port shown in URLs (default: same as port)")
-    .option("--domain <domain>", "Base domain", "localhost")
-    .option("-b, --base-path <path>", "Subdomain base path (e.g., 'op' for *.op.domain.com)", "op")
-    .option("--host <host>", "Bind host", "0.0.0.0")
-    .option("--tcp-min <port>", "Minimum TCP port", "10000")
-    .option("--tcp-max <port>", "Maximum TCP port", "20000")
+    .option("--domain <domain>", "Base domain")
+    .option("-b, --base-path <path>", "Subdomain base path (e.g., 'op' for *.op.domain.com)")
+    .option("--host <host>", "Bind host")
+    .option("--tcp-min <port>", "Minimum TCP port")
+    .option("--tcp-max <port>", "Maximum TCP port")
     .option("--auth-tokens <tokens>", "Comma-separated auth tokens")
     .option("--no-https", "Disable HTTPS (use plain HTTP)")
     .option("--https-cert <path>", "Path to SSL certificate (for custom certs)")
@@ -419,49 +492,79 @@ program
     .option("--duckdns-token <token>", "DuckDNS token for dynamic DNS updates")
     .option("-d, --detach", "Run server in background (detached mode)")
     .action(async (options) => {
-        // Detached mode - run in background
-        if (options.detach) {
-            const { spawn } = await import("child_process");
-            const fs = await import("fs");
-            const path = await import("path");
+        // Load config from opentunnel.yml if exists (with env variable substitution)
+        const configPath = path.join(process.cwd(), CONFIG_FILE);
+        let fileConfig: any = {};
 
-            const pidFile = path.join(process.cwd(), ".opentunnel.pid");
-            const logFile = path.join(process.cwd(), "opentunnel.log");
+        try {
+            const parsed = loadConfig(configPath);
+            if (parsed?.server && parsed.server.domain) {
+                fileConfig = parsed.server;
+            }
+        } catch (err) {
+            // Ignore parse errors, use CLI options
+        }
+
+        // Merge config: CLI options override file config, then defaults
+        const mergedOptions = {
+            port: options.port || fileConfig.port?.toString() || "443",
+            publicPort: options.publicPort || fileConfig.publicPort?.toString(),
+            domain: options.domain || fileConfig.domain || "localhost",
+            basePath: options.basePath || fileConfig.basePath || "op",
+            host: options.host || fileConfig.host || "0.0.0.0",
+            tcpMin: options.tcpMin || fileConfig.tcpPortMin?.toString() || "10000",
+            tcpMax: options.tcpMax || fileConfig.tcpPortMax?.toString() || "20000",
+            authTokens: options.authTokens || fileConfig.token,
+            https: options.https !== false && fileConfig.https !== false,
+            httpsCert: options.httpsCert,
+            httpsKey: options.httpsKey,
+            letsencrypt: options.letsencrypt,
+            email: options.email,
+            production: options.production,
+            cloudflareToken: options.cloudflareToken,
+            duckdnsToken: options.duckdnsToken,
+            detach: options.detach,
+        };
+        // Detached mode - run in background
+        if (mergedOptions.detach) {
+            const { spawn } = await import("child_process");
+            const fsAsync = await import("fs");
+            const pathAsync = await import("path");
+
+            const pidFile = pathAsync.join(process.cwd(), ".opentunnel.pid");
+            const logFile = pathAsync.join(process.cwd(), "opentunnel.log");
 
             // Check if already running
-            if (fs.existsSync(pidFile)) {
-                const oldPid = fs.readFileSync(pidFile, "utf-8").trim();
+            if (fsAsync.existsSync(pidFile)) {
+                const oldPid = fsAsync.readFileSync(pidFile, "utf-8").trim();
                 try {
                     process.kill(parseInt(oldPid), 0);
                     console.log(chalk.yellow(`Server already running (PID: ${oldPid})`));
                     console.log(chalk.gray(`Stop it with: opentunnel stop`));
                     return;
                 } catch {
-                    fs.unlinkSync(pidFile);
+                    fsAsync.unlinkSync(pidFile);
                 }
             }
 
-            // Build args without -d flag
+            // Build args without -d flag, using merged options
             const args = ["server"];
-            if (options.port) args.push("-p", options.port);
-            if (options.publicPort) args.push("--public-port", options.publicPort);
-            if (options.domain) args.push("--domain", options.domain);
-            if (options.basePath) args.push("-b", options.basePath);
-            if (options.host) args.push("--host", options.host);
-            if (options.tcpMin) args.push("--tcp-min", options.tcpMin);
-            if (options.tcpMax) args.push("--tcp-max", options.tcpMax);
-            if (options.authTokens) args.push("--auth-tokens", options.authTokens);
-            if (options.https) args.push("--https");
-            if (options.email) args.push("--email", options.email);
-            if (options.production) args.push("--production");
-            if (options.cloudflareToken) args.push("--cloudflare-token", options.cloudflareToken);
-            if (options.duckdnsToken) args.push("--duckdns-token", options.duckdnsToken);
-            if (options.autoDns) args.push("--auto-dns");
-            if (options.dnsCreateRecords) args.push("--dns-create-records");
-            if (options.dnsDeleteOnClose) args.push("--dns-delete-on-close");
+            args.push("-p", mergedOptions.port);
+            args.push("--domain", mergedOptions.domain);
+            args.push("-b", mergedOptions.basePath);
+            args.push("--host", mergedOptions.host);
+            args.push("--tcp-min", mergedOptions.tcpMin);
+            args.push("--tcp-max", mergedOptions.tcpMax);
+            if (mergedOptions.publicPort) args.push("--public-port", mergedOptions.publicPort);
+            if (mergedOptions.authTokens) args.push("--auth-tokens", mergedOptions.authTokens);
+            if (mergedOptions.https) args.push("--https");
+            if (mergedOptions.email) args.push("--email", mergedOptions.email);
+            if (mergedOptions.production) args.push("--production");
+            if (mergedOptions.cloudflareToken) args.push("--cloudflare-token", mergedOptions.cloudflareToken);
+            if (mergedOptions.duckdnsToken) args.push("--duckdns-token", mergedOptions.duckdnsToken);
 
-            const out = fs.openSync(logFile, "a");
-            const err = fs.openSync(logFile, "a");
+            const out = fsAsync.openSync(logFile, "a");
+            const err = fsAsync.openSync(logFile, "a");
 
             const child = spawn(process.execPath, [process.argv[1], ...args], {
                 detached: true,
@@ -470,16 +573,16 @@ program
             });
 
             child.unref();
-            fs.writeFileSync(pidFile, String(child.pid));
+            fsAsync.writeFileSync(pidFile, String(child.pid));
 
             console.log(chalk.green(`OpenTunnel server started in background`));
             console.log(chalk.gray(`  PID:      ${child.pid}`));
-            console.log(chalk.gray(`  Port:     ${options.port}`));
-            console.log(chalk.gray(`  Domain:   ${options.domain}`));
+            console.log(chalk.gray(`  Port:     ${mergedOptions.port}`));
+            console.log(chalk.gray(`  Domain:   ${mergedOptions.domain}`));
             console.log(chalk.gray(`  Log:      ${logFile}`));
             console.log(chalk.gray(`  PID file: ${pidFile}`));
             console.log("");
-            console.log(chalk.gray(`Stop with:  node dist/cli/index.js stop`));
+            console.log(chalk.gray(`Stop with:  opentunnel stop`));
             console.log(chalk.gray(`Logs:       tail -f ${logFile}`));
             return;
         }
@@ -492,45 +595,45 @@ program
         let selfSignedHttpsConfig = undefined;
         let autoHttpsConfig = undefined;
 
-        if (options.httpsCert && options.httpsKey) {
+        if (mergedOptions.httpsCert && mergedOptions.httpsKey) {
             // Custom certificates provided
-            const fs = await import("fs");
+            const fsRead = await import("fs");
             httpsConfig = {
-                cert: fs.readFileSync(options.httpsCert, "utf-8"),
-                key: fs.readFileSync(options.httpsKey, "utf-8"),
+                cert: fsRead.readFileSync(mergedOptions.httpsCert, "utf-8"),
+                key: fsRead.readFileSync(mergedOptions.httpsKey, "utf-8"),
             };
-        } else if (options.letsencrypt) {
+        } else if (mergedOptions.letsencrypt) {
             // Let's Encrypt
             autoHttpsConfig = {
                 enabled: true,
-                email: options.email || `admin@${options.domain}`,
-                production: options.production || false,
-                cloudflareToken: options.cloudflareToken,
+                email: mergedOptions.email || `admin@${mergedOptions.domain}`,
+                production: mergedOptions.production || false,
+                cloudflareToken: mergedOptions.cloudflareToken,
             };
         } else {
             // Self-signed by default (use --no-https to disable)
             selfSignedHttpsConfig = {
-                enabled: options.https !== false,
+                enabled: mergedOptions.https !== false,
             };
         }
 
         const server = new TunnelServer({
-            port: parseInt(options.port),
-            publicPort: options.publicPort ? parseInt(options.publicPort) : undefined,
-            host: options.host,
-            domain: options.domain,
-            basePath: options.basePath,
+            port: parseInt(mergedOptions.port),
+            publicPort: mergedOptions.publicPort ? parseInt(mergedOptions.publicPort) : undefined,
+            host: mergedOptions.host,
+            domain: mergedOptions.domain,
+            basePath: mergedOptions.basePath,
             tunnelPortRange: {
-                min: parseInt(options.tcpMin),
-                max: parseInt(options.tcpMax),
+                min: parseInt(mergedOptions.tcpMin),
+                max: parseInt(mergedOptions.tcpMax),
             },
-            auth: options.authTokens
-                ? { required: true, tokens: options.authTokens.split(",") }
+            auth: mergedOptions.authTokens
+                ? { required: true, tokens: mergedOptions.authTokens.split(",") }
                 : undefined,
             https: httpsConfig,
             selfSignedHttps: selfSignedHttpsConfig,
             autoHttps: autoHttpsConfig,
-            autoDns: detectDnsConfig(options),
+            autoDns: detectDnsConfig(mergedOptions),
         });
 
         // Helper function to auto-detect DNS provider
@@ -545,8 +648,8 @@ program
                     enabled: true,
                     provider: "cloudflare" as const,
                     cloudflareToken: opts.cloudflareToken,
-                    createRecords: opts.dnsCreateRecords !== false,
-                    deleteOnClose: opts.dnsDeleteOnClose || false,
+                    createRecords: false,
+                    deleteOnClose: false,
                     setupWildcard: true,
                 };
             }
@@ -556,15 +659,10 @@ program
                     enabled: true,
                     provider: "duckdns" as const,
                     duckdnsToken: opts.duckdnsToken,
-                    createRecords: false, // DuckDNS doesn't support subdomains
+                    createRecords: false,
                     deleteOnClose: false,
                     setupWildcard: false,
                 };
-            }
-
-            // No auto DNS if no tokens provided
-            if (opts.autoDns) {
-                console.log(chalk.yellow("Warning: --auto-dns requires --cloudflare-token or --duckdns-token"));
             }
 
             return undefined;
@@ -588,10 +686,10 @@ program
         });
 
         await server.start();
-        console.log(chalk.green(`\nServer running on ${options.host}:${options.port}`));
-        console.log(chalk.gray(`Domain: ${options.domain}`));
-        console.log(chalk.gray(`Subdomain pattern: *.${options.basePath}.${options.domain}`));
-        console.log(chalk.gray(`TCP port range: ${options.tcpMin}-${options.tcpMax}\n`));
+        console.log(chalk.green(`\nServer running on ${mergedOptions.host}:${mergedOptions.port}`));
+        console.log(chalk.gray(`Domain: ${mergedOptions.domain}`));
+        console.log(chalk.gray(`Subdomain pattern: *.${mergedOptions.basePath}.${mergedOptions.domain}`));
+        console.log(chalk.gray(`TCP port range: ${mergedOptions.tcpMin}-${mergedOptions.tcpMax}\n`));
     });
 
 // Stop command
@@ -936,52 +1034,90 @@ program
     .command("init")
     .description("Create an example opentunnel.yml configuration file")
     .option("-f, --force", "Overwrite existing config file")
+    .option("--server", "Create server mode config")
+    .option("--client", "Create client mode config (default)")
     .action(async (options) => {
-        const fs = await import("fs");
-        const path = await import("path");
+        const fsInit = await import("fs");
+        const pathInit = await import("path");
 
-        const configPath = path.join(process.cwd(), CONFIG_FILE);
+        const configPath = pathInit.join(process.cwd(), CONFIG_FILE);
+        const envPath = pathInit.join(process.cwd(), ".env");
 
-        if (fs.existsSync(configPath) && !options.force) {
+        if (fsInit.existsSync(configPath) && !options.force) {
             console.log(chalk.yellow(`Config file already exists: ${configPath}`));
             console.log(chalk.gray("Use --force to overwrite"));
             return;
         }
 
-        const exampleConfig: OpenTunnelConfig = {
-            version: "1.0",
-            server: {
-                domain: "localhost",
-                // remote: "op.fjrg2007.com",  // Use this to connect to a remote server
-                // token: "your-auth-token",
-            },
-            tunnels: [
-                {
-                    name: "web",
-                    protocol: "http",
-                    port: 3000,
-                    subdomain: "web",
-                    autostart: true,
-                },
-                {
-                    name: "api",
-                    protocol: "http",
-                    port: 4000,
-                    subdomain: "api",
-                    autostart: true,
-                },
-                {
-                    name: "database",
-                    protocol: "tcp",
-                    port: 5432,
-                    autostart: false,
-                },
-            ],
-        };
+        // Example config with environment variable syntax
+        const clientConfig = `# OpenTunnel Client Configuration
+# Supports environment variables: \${VAR} or \${VAR:-default}
+# Create a .env file for secrets (automatically loaded)
 
-        fs.writeFileSync(configPath, stringifyYaml(exampleConfig, { indent: 2 }));
+version: "1.0"
+
+server:
+  remote: \${SERVER_DOMAIN:-example.com}   # Server domain (system adds basePath)
+  token: \${AUTH_TOKEN}                     # From .env (required for private servers)
+
+tunnels:
+  - name: web
+    protocol: http
+    port: 3000
+    subdomain: web                          # → web.op.example.com
+    autostart: true
+
+  - name: api
+    protocol: http
+    port: 4000
+    subdomain: api                          # → api.op.example.com
+
+  - name: database
+    protocol: tcp
+    port: 5432
+    remotePort: 15432                       # → example.com:15432
+    autostart: false
+`;
+
+        const serverConfig = `# OpenTunnel Server Configuration
+# Supports environment variables: \${VAR} or \${VAR:-default}
+# Create a .env file for secrets (automatically loaded)
+
+version: "1.0"
+
+server:
+  domain: \${DOMAIN:-example.com}           # Your base domain
+  token: \${AUTH_TOKEN}                     # From .env (optional for public server)
+
+tunnels: []
+`;
+
+        const envExample = `# OpenTunnel Environment Variables
+# Copy to .env and fill in your values
+
+# Server/Remote domain
+DOMAIN=example.com
+SERVER_DOMAIN=example.com
+
+# Authentication token (leave empty for public server)
+AUTH_TOKEN=
+`;
+
+        const configContent = options.server ? serverConfig : clientConfig;
+        fsInit.writeFileSync(configPath, configContent);
+
+        // Create .env.example if it doesn't exist
+        const envExamplePath = pathInit.join(process.cwd(), ".env.example");
+        if (!fsInit.existsSync(envExamplePath) && !fsInit.existsSync(envPath)) {
+            fsInit.writeFileSync(envExamplePath, envExample);
+            console.log(chalk.green(`Created .env.example`));
+        }
+
         console.log(chalk.green(`Created ${CONFIG_FILE}`));
-        console.log(chalk.gray(`\nEdit the file to configure your tunnels, then run:`));
+        console.log(chalk.gray(`\nEnvironment variables supported:`));
+        console.log(chalk.cyan(`  \${VAR}           → Use value of VAR`));
+        console.log(chalk.cyan(`  \${VAR:-default}  → Use VAR or "default" if not set`));
+        console.log(chalk.gray(`\nCreate a .env file for secrets, then run:`));
         console.log(chalk.cyan(`  opentunnel up      # Start all tunnels`));
         console.log(chalk.cyan(`  opentunnel up -d   # Start in background`));
     });
@@ -994,17 +1130,14 @@ program
     .option("-f, --file <path>", "Config file path", CONFIG_FILE)
     .option("--no-autostart", "Ignore autostart setting, start all tunnels")
     .action(async (options) => {
-        const fs = await import("fs");
-        const path = await import("path");
+        const fsModule = await import("fs");
+        const pathModule = await import("path");
 
-        // Load config file
-        const configPath = path.join(process.cwd(), options.file);
-        let config: OpenTunnelConfig = { version: "1.0", tunnels: [] };
+        // Load config file (with env variable substitution)
+        const configPath = pathModule.join(process.cwd(), options.file);
+        const config = loadConfig(configPath);
 
-        if (fs.existsSync(configPath)) {
-            const configContent = fs.readFileSync(configPath, "utf-8");
-            config = parseYaml(configContent);
-        } else {
+        if (!config) {
             console.log(chalk.red(`Config file not found: ${configPath}`));
             console.log(chalk.gray(`Run 'opentunnel init' to create one`));
             return;
@@ -1043,17 +1176,17 @@ program
             console.log(chalk.gray("\nAdd to your config:"));
             console.log(chalk.cyan("\n  # Run your own server:"));
             console.log(chalk.white("  server:"));
-            console.log(chalk.white("    domain: localhost"));
+            console.log(chalk.white("    domain: example.com"));
             console.log(chalk.cyan("\n  # Or connect to a remote server:"));
             console.log(chalk.white("  server:"));
-            console.log(chalk.white("    remote: op.fjrg2007.com"));
+            console.log(chalk.white("    remote: example.com"));
             process.exit(1);
         }
 
         if (isClientMode) {
             // CLIENT MODE: Connect to remote server
-            const protocol = useHttps ? "wss" : "ws";
-            const serverUrl = `${protocol}://${remote}/_tunnel`;
+            // Build URL using basePath (default: op) -> wss://op.example.com/_tunnel
+            const { url: serverUrl } = buildServerUrl(remote!, !useHttps, basePath);
 
             console.log(chalk.cyan(`Connecting to ${remote}...\n`));
             console.log(chalk.cyan(`Starting ${tunnelsToStart.length} tunnel(s)...\n`));

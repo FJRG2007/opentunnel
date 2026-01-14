@@ -10,6 +10,7 @@
 - [As a Server](#-as-a-server) - Host your own tunnel server
 - [Authentication](#-authentication) - Secure your server
 - [Configuration File](#-configuration-file) - opentunnel.yml reference
+  - [Environment Variables](#environment-variables) - Docker-style ${VAR:-default} syntax
 - [Commands Reference](#-commands-reference)
 
 ---
@@ -25,7 +26,7 @@ Use OpenTunnel to expose your local services to the internet. Connect to any Ope
 npm install -g opentunnel-cli
 
 # Or use without installing
-npx opentunnel-cli quick 3000 -s op.example.com
+npx opentunnel-cli quick 3000 -s example.com
 ```
 
 ## Quick Start
@@ -35,7 +36,7 @@ npx opentunnel-cli quick 3000 -s op.example.com
 The fastest way to expose a port:
 
 ```bash
-opentunnel quick 3000 -s op.example.com
+opentunnel quick 3000 -s example.com
 ```
 
 Your local port 3000 is now accessible from the internet:
@@ -48,11 +49,12 @@ Your local port 3000 is now accessible from the internet:
 
 **Options:**
 ```bash
-opentunnel quick 3000 -s op.example.com                # Basic HTTP tunnel
-opentunnel quick 3000 -s op.example.com -n myapp       # Custom subdomain
-opentunnel quick 5432 -s op.example.com -p tcp         # TCP tunnel
-opentunnel quick 3000 -s op.example.com -t SECRET      # With auth token
-opentunnel quick 3000 -s op.example.com --insecure     # Self-signed cert
+opentunnel quick 3000 -s example.com                  # Basic HTTP tunnel
+opentunnel quick 3000 -s example.com -n myapp         # Custom subdomain
+opentunnel quick 5432 -s example.com -p tcp           # TCP tunnel
+opentunnel quick 3000 -s example.com -t SECRET        # With auth token
+opentunnel quick 3000 -s example.com --insecure       # Self-signed cert
+opentunnel quick 3000 -s example.com -b ""            # No basePath (direct domain)
 ```
 
 ### Option 2: HTTP/TCP Commands
@@ -61,13 +63,13 @@ More control with specific commands:
 
 ```bash
 # HTTP tunnel
-opentunnel http 3000 --server op.example.com
+opentunnel http 3000 -s example.com
 
 # With authentication
-opentunnel http 3000 --server op.example.com --token SECRET
+opentunnel http 3000 -s example.com -t SECRET
 
 # TCP tunnel
-opentunnel tcp 5432 --server op.example.com --remote-port 15432
+opentunnel tcp 5432 -s example.com -r 15432
 ```
 
 ### Option 3: Using Config File
@@ -78,30 +80,32 @@ Create `opentunnel.yml`:
 version: "1.0"
 
 server:
-  remote: op.example.com    # Server to connect to
-  token: your-secret-token      # Optional: authentication token
+  remote: example.com             # Base domain (system adds basePath)
+  # basePath: op                  # Optional: defaults to "op", empty for direct domain
+  token: your-secret-token        # Optional: authentication token
 
 tunnels:
   - name: web
     protocol: http
     port: 3000
-    subdomain: myapp
+    subdomain: myapp              # → myapp.op.example.com
 
   - name: api
     protocol: http
     port: 4000
-    subdomain: api
+    subdomain: api                # → api.op.example.com
 
   - name: postgres
     protocol: tcp
     port: 5432
-    remotePort: 15432
+    remotePort: 15432             # → example.com:15432
 ```
 
 ```bash
-opentunnel up      # Start all tunnels
-opentunnel down    # Stop all tunnels
-opentunnel ps      # Check status
+opentunnel up         # Start all tunnels
+opentunnel up -d      # Start in background
+opentunnel down       # Stop all tunnels
+opentunnel ps         # Check status
 ```
 
 ---
@@ -122,7 +126,7 @@ Create these DNS records pointing to your server:
 
 | Type | Name | Value | Notes |
 |------|------|-------|-------|
-| A | `op` | `YOUR_SERVER_IP` | Main server |
+| A | `op` | `YOUR_SERVER_IP` | Main server (or your basePath) |
 | A | `*.op` | `YOUR_SERVER_IP` | Wildcard for subdomains |
 
 > **Cloudflare users:** Set proxy status to "DNS only" (gray cloud)
@@ -142,17 +146,40 @@ Tunnels will be available at: `https://myapp.op.example.com`
 npm install -g opentunnel-cli
 
 # Start public server (anyone can connect)
-sudo opentunnel server -d --domain example.com --letsencrypt --email admin@example.com
+opentunnel server -d --domain example.com --letsencrypt --email admin@example.com
 
 # Start private server (requires token to connect)
-sudo opentunnel server -d --domain example.com --letsencrypt --email admin@example.com --auth-tokens "SECRET123"
+opentunnel server -d --domain example.com --letsencrypt --email admin@example.com --auth-tokens "SECRET123"
 
-# OR
-
-sudo opentunnel server -d --domain example.com --letsencrypt --email admin@example.com --auth-tokens "SECRET1,SECRET2"
+# Stop server
+opentunnel stop
 ```
 
-### Option 2: Docker (Recommended for Production)
+### Option 2: Using Config File
+
+Create `opentunnel.yml`:
+
+```yaml
+version: "1.0"
+
+server:
+  domain: example.com             # Base domain only
+  # basePath: op                  # Optional: defaults to "op"
+  port: 443
+  https: true
+  tcpPortMin: 10000
+  tcpPortMax: 20000
+  # token: SECRET123              # Uncomment for private server
+
+tunnels: []
+```
+
+```bash
+opentunnel server -d    # Start in background (reads from opentunnel.yml)
+opentunnel stop         # Stop server
+```
+
+### Option 3: Docker (Recommended for Production)
 
 ```bash
 git clone https://github.com/FJRG2007/opentunnel.git
@@ -165,7 +192,7 @@ nano .env
 
 Edit `.env`:
 ```env
-DOMAIN=example.com              # Solo el dominio base (sin el prefijo op)
+DOMAIN=example.com              # Base domain only (without the op prefix)
 AUTH_TOKENS=SECRET123           # Leave empty for public server
 LETSENCRYPT_EMAIL=admin@example.com
 LETSENCRYPT_PRODUCTION=true
@@ -173,9 +200,10 @@ LETSENCRYPT_PRODUCTION=true
 
 ```bash
 docker-compose up -d
+docker-compose down     # Stop server
 ```
 
-### Option 3: One-Line Install (Linux with systemd)
+### Option 4: One-Line Install (Linux with systemd)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/FJRG2007/opentunnel/main/deploy/install.sh | sudo bash
@@ -185,6 +213,7 @@ Then configure:
 ```bash
 sudo nano /opt/opentunnel/.env
 sudo systemctl start opentunnel
+sudo systemctl stop opentunnel
 sudo systemctl status opentunnel
 ```
 
@@ -199,9 +228,10 @@ Required:
 
 Optional:
   -p, --port <port>           Server port (default: 443)
-  -b, --base-path <path>      Subdomain prefix (default: op)
+  -b, --base-path <path>      Subdomain prefix (default: op, empty for direct)
   --tcp-min <port>            Min TCP tunnel port (default: 10000)
   --tcp-max <port>            Max TCP tunnel port (default: 20000)
+  -d, --detach                Run in background
 
 Authentication:
   --auth-tokens <tokens>      Comma-separated tokens for private server
@@ -212,9 +242,6 @@ SSL/TLS:
   --email <email>             Email for Let's Encrypt
   --production                Use Let's Encrypt production (not staging)
   --cloudflare-token <token>  Cloudflare API token for DNS-01 challenge
-
-Other:
-  -d, --detach                Run in background
 ```
 
 ## Server Modes
@@ -224,12 +251,12 @@ Other:
 Anyone can connect without authentication:
 
 ```bash
-opentunnel server --domain example.com --letsencrypt --email admin@example.com
+opentunnel server -d --domain example.com --letsencrypt --email admin@example.com
 ```
 
 Clients connect with:
 ```bash
-opentunnel quick 3000 -s op.example.com
+opentunnel quick 3000 -s example.com
 ```
 
 ### Private Server
@@ -237,12 +264,12 @@ opentunnel quick 3000 -s op.example.com
 Only clients with valid tokens can connect:
 
 ```bash
-opentunnel server --domain example.com --letsencrypt --email admin@example.com --auth-tokens "token1,token2,token3"
+opentunnel server -d --domain example.com --letsencrypt --email admin@example.com --auth-tokens "token1,token2"
 ```
 
 Clients must provide a token:
 ```bash
-opentunnel quick 3000 -s op.example.com --token token1
+opentunnel quick 3000 -s example.com -t token1
 ```
 
 ---
@@ -255,10 +282,17 @@ OpenTunnel uses a **shared secret** system for authentication. The server define
 
 ```bash
 # Single token
-opentunnel server --domain example.com --auth-tokens "my-secret-token"
+opentunnel server -d --domain example.com --auth-tokens "my-secret-token"
 
 # Multiple tokens (one per user/team)
-opentunnel server --domain example.com --auth-tokens "team-a-token,team-b-token,dev-token"
+opentunnel server -d --domain example.com --auth-tokens "team-a-token,team-b-token,dev-token"
+```
+
+Or in `opentunnel.yml`:
+```yaml
+server:
+  domain: example.com
+  token: my-secret-token
 ```
 
 Or in `.env`:
@@ -270,11 +304,11 @@ AUTH_TOKENS=team-a-token,team-b-token,dev-token
 
 ```bash
 # Command line
-opentunnel quick 3000 --token my-secret-token
+opentunnel quick 3000 -s example.com -t my-secret-token
 
 # Or in opentunnel.yml
 server:
-  remote: op.example.com
+  remote: example.com
   token: my-secret-token
 ```
 
@@ -289,7 +323,40 @@ server:
 
 # 📄 Configuration File
 
-Create `opentunnel.yml` in your project directory:
+Create `opentunnel.yml` in your project directory.
+
+## Environment Variables
+
+OpenTunnel supports **Docker-style environment variable substitution** in config files. Variables are loaded from `.env` file automatically.
+
+| Syntax | Description |
+|--------|-------------|
+| `${VAR}` | Use value of VAR |
+| `${VAR:-default}` | Use VAR if set, otherwise use "default" |
+| `${VAR:=default}` | Same as above (alternative syntax) |
+
+**Example with `.env` file:**
+
+```env
+# .env
+AUTH_TOKEN=my-secret-token
+SERVER_DOMAIN=example.com
+```
+
+```yaml
+# opentunnel.yml
+version: "1.0"
+
+server:
+  remote: ${SERVER_DOMAIN:-localhost}    # Uses example.com from .env
+  token: ${AUTH_TOKEN}                   # Uses my-secret-token from .env
+
+tunnels:
+  - name: web
+    protocol: http
+    port: 3000
+    subdomain: app
+```
 
 ## Client Mode (connect to remote server)
 
@@ -297,26 +364,27 @@ Create `opentunnel.yml` in your project directory:
 version: "1.0"
 
 server:
-  remote: op.example.com      # Server hostname
-  token: your-secret-token        # Optional: for private servers
+  remote: ${SERVER_DOMAIN:-example.com}  # Base domain (system adds basePath)
+  # basePath: op                         # Optional: defaults to "op"
+  token: ${AUTH_TOKEN}                   # From .env or environment
 
 tunnels:
   - name: frontend
     protocol: http
     port: 3000
-    subdomain: app                 # → app.op.example.com
+    subdomain: app                       # → app.op.example.com
     autostart: true
 
   - name: backend
     protocol: http
     port: 4000
-    subdomain: api                 # → api.op.example.com
+    subdomain: api                       # → api.op.example.com
 
   - name: database
     protocol: tcp
     port: 5432
-    remotePort: 15432              # → op.example.com:15432
-    autostart: false               # Start manually with: opentunnel tunnel database
+    remotePort: 15432                    # → example.com:15432
+    autostart: false
 ```
 
 ## Server Mode (run your own server)
@@ -325,15 +393,10 @@ tunnels:
 version: "1.0"
 
 server:
-  domain: example.com       # Solo el dominio base
-  basePath: op              # Prefijo → *.op.example.com
-  port: 443
-  https: true
-  tcpPortMin: 10000
-  tcpPortMax: 20000
-  # token: optional-auth-token    # Uncomment for private server
+  domain: ${DOMAIN:-example.com}         # Base domain only
+  token: ${AUTH_TOKEN}                   # Optional: for private server
 
-tunnels: []  # Server-only, no local tunnels
+tunnels: []
 ```
 
 ## Commands
@@ -343,6 +406,7 @@ opentunnel init       # Create example config file
 opentunnel up         # Start server/tunnels from config
 opentunnel up -d      # Start in background
 opentunnel down       # Stop everything
+opentunnel stop       # Stop server
 opentunnel ps         # Show running processes
 ```
 
@@ -352,32 +416,31 @@ opentunnel ps         # Show running processes
 
 | Command | Description |
 |---------|-------------|
-| `opentunnel quick <port> -s <server>` | Quick tunnel to a server |
+| `opentunnel quick <port> -s <domain>` | Quick tunnel to a server |
 | `opentunnel http <port>` | HTTP tunnel with options |
 | `opentunnel tcp <port>` | TCP tunnel with options |
-| `opentunnel server` | Start tunnel server |
+| `opentunnel server -d` | Start tunnel server in background |
 | `opentunnel up` | Start from opentunnel.yml |
 | `opentunnel down` | Stop all tunnels |
+| `opentunnel stop` | Stop server |
 | `opentunnel ps` | List running processes |
 | `opentunnel init` | Create config file |
-| `opentunnel setup` | Show setup guide |
-| `opentunnel logs` | View server logs |
-| `opentunnel status` | Check server status |
 
 ## Quick Command
 
 ```bash
-opentunnel quick <port> -s <server-url> [options]
+opentunnel quick <port> -s <domain> [options]
 
 Required:
-  -s, --server <host>       Server hostname (e.g., op.example.com)
+  -s, --server <domain>       Server base domain (e.g., example.com)
 
 Options:
-  -n, --subdomain <name>    Request specific subdomain
-  -p, --protocol <proto>    http, https, or tcp (default: http)
-  -h, --host <host>         Local host (default: localhost)
-  -t, --token <token>       Authentication token
-  --insecure                Skip SSL verification (self-signed certs)
+  -b, --base-path <path>      Server base path (default: op, empty for direct)
+  -n, --subdomain <name>      Request specific subdomain
+  -p, --protocol <proto>      http, https, or tcp (default: http)
+  -h, --host <host>           Local host (default: localhost)
+  -t, --token <token>         Authentication token
+  --insecure                  Skip SSL verification (self-signed certs)
 ```
 
 ## HTTP/TCP Commands
@@ -387,12 +450,13 @@ opentunnel http <port> [options]
 opentunnel tcp <port> [options]
 
 Options:
-  -s, --server <host>       Server hostname (e.g., op.example.com)
-  -t, --token <token>       Authentication token
-  -n, --subdomain <name>    Custom subdomain
-  -h, --host <host>         Local host (default: localhost)
-  -r, --remote-port <port>  Remote TCP port (tcp only)
-  -d, --detach              Run in background
+  -s, --server <domain>       Server base domain (e.g., example.com)
+  -b, --base-path <path>      Server base path (default: op)
+  -t, --token <token>         Authentication token
+  -n, --subdomain <name>      Custom subdomain
+  -h, --host <host>           Local host (default: localhost)
+  -r, --remote-port <port>    Remote TCP port (tcp only)
+  -d, --detach                Run in background
 ```
 
 ---
@@ -403,13 +467,13 @@ Options:
 ┌─────────────────────────────────────────────────────────────────┐
 │                         INTERNET                                 │
 │                                                                  │
-│   Users access: https://myapp.op.example.com                │
+│   Users access: https://myapp.op.example.com                    │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    OpenTunnel Server                             │
-│                  (op.example.com)                           │
+│                    (op.example.com)                             │
 │                                                                  │
 │   - Receives HTTPS requests                                     │
 │   - Routes by subdomain                                         │
@@ -443,8 +507,8 @@ Options:
 
 [Proprietary License](LICENSE) - All rights reserved.
 
-- ✅ Personal and educational use allowed
+- ✅ Personal, educational, and commercial use allowed
 - ❌ No forks or redistribution without permission
-- ❌ No commercial use without explicit consent
+- ❌ No reselling or monetization without explicit consent
 
-Contact FJRG2007 for commercial licensing.
+Contact FJRG2007 for licensing questions.

@@ -1,23 +1,23 @@
 version: "1.0"
 
 server:
-  remote: op.fjrg2007.com         # Servidor al que conectar (basePath.domain)
-  token: your-secret-token        # Token de autenticación
+  remote: ${SERVER_DOMAIN:-fjrg2007.com}  # Base domain only (system adds basePath)
+  token: ${AUTH_TOKEN}                    # From .env (required for private servers)
 
 tunnels:
   - name: frontend
     protocol: http
     port: 3000
-    subdomain: app                 # → app.op.fjrg2007.com
+    subdomain: app                        # → app.op.fjrg2007.com
     autostart: true
 
   - name: backend
     protocol: http
     port: 4000
-    subdomain: api                 # → api.op.fjrg2007.com
+    subdomain: api                        # → api.op.fjrg2007.com
 
   - name: database
     protocol: tcp
     port: 5432
-    remotePort: 15432              # → op.fjrg2007.com:15432
+    remotePort: 15432                     # → fjrg2007.com:15432
     autostart: false

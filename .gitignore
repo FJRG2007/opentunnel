@@ -16,3 +16,5 @@ Thumbs.db
 *.swo
 coverage/
 .nyc_output/tmpclaude-*
+.opentunnel.pid
+opentunnel.log

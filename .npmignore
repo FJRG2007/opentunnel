@@ -4,3 +4,5 @@
 .env
 tests
 deploy
+.opentunnel.pid
+opentunnel.log
