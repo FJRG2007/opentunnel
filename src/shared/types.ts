@@ -129,6 +129,15 @@ export type Message =
     | ErrorMessage
     | BaseMessage;
 
+// IP Access Control types
+export type IpAccessMode = "all" | "allowlist" | "denylist";
+
+export interface IpAccessConfig {
+    mode: IpAccessMode;           // "all" = allow everyone, "allowlist" = only allow listed, "denylist" = deny listed
+    allowList?: string[];         // IPs or CIDR ranges to allow (e.g., ["192.168.1.0/24", "10.0.0.1"])
+    denyList?: string[];          // IPs or CIDR ranges to deny
+}
+
 // Server configuration
 export interface ServerConfig {
     port: number;
@@ -156,6 +165,8 @@ export interface ServerConfig {
         required: boolean;
         tokens: string[];
     };
+    // IP-based access control
+    ipAccess?: IpAccessConfig;
     duckdns?: {
         token: string;
         domain: string;

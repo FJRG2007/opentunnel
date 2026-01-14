@@ -9,6 +9,7 @@
 - [As a Client](#-as-a-client) - Expose your local ports
 - [As a Server](#-as-a-server) - Host your own tunnel server
 - [Authentication](#-authentication) - Secure your server
+- [IP Access Control](#-ip-access-control) - Allow/deny IPs and CIDR ranges
 - [Configuration File](#-configuration-file) - opentunnel.yml reference
   - [Environment Variables](#environment-variables) - Docker-style ${VAR:-default} syntax
 - [Commands Reference](#-commands-reference)
@@ -232,6 +233,11 @@ SSL/TLS:
   --email <email>             Email for Let's Encrypt
   --production                Use Let's Encrypt production (not staging)
   --cloudflare-token <token>  Cloudflare API token for DNS-01 challenge
+
+IP Access Control:
+  --ip-mode <mode>            Access mode: all, allowlist, denylist (default: all)
+  --ip-allow <ips>            Comma-separated IPs/CIDRs to allow
+  --ip-deny <ips>             Comma-separated IPs/CIDRs to deny
 ```
 
 ## Server Modes
@@ -308,6 +314,60 @@ server:
 2. **One token per user/team**: Easier to revoke access if needed
 3. **HTTPS only**: Always use `--letsencrypt` in production
 4. **Rotate tokens periodically**: Update tokens and notify users
+
+---
+
+# 🛡️ IP Access Control
+
+Control which IP addresses can connect to your server. By default, all IPs are allowed.
+
+## Access Modes
+
+| Mode | Description |
+|------|-------------|
+| `all` | Allow all IPs (default) |
+| `allowlist` | Only allow IPs in the allow list |
+| `denylist` | Deny IPs in the deny list, allow others |
+
+## Command Line
+
+```bash
+# Only allow specific IPs/ranges
+opentunnel server -d --domain example.com --ip-mode allowlist --ip-allow "192.168.1.0/24,10.0.0.1"
+
+# Deny specific IPs
+opentunnel server -d --domain example.com --ip-mode denylist --ip-deny "1.2.3.4,5.6.7.0/24"
+```
+
+## Configuration File
+
+```yaml
+server:
+  domain: example.com
+  token: ${AUTH_TOKEN}
+  ipAccess:
+    mode: allowlist                       # all, allowlist, or denylist
+    allowList:
+      - 192.168.1.0/24                    # Allow entire subnet
+      - 10.0.0.1                          # Allow single IP
+      - 172.16.0.0/16                     # Allow another range
+```
+
+```yaml
+server:
+  domain: example.com
+  ipAccess:
+    mode: denylist
+    denyList:
+      - 1.2.3.4                           # Block single IP
+      - 5.6.7.0/24                        # Block entire subnet
+```
+
+## Supported Formats
+
+- Single IP: `192.168.1.1`
+- CIDR notation: `192.168.1.0/24` (256 addresses)
+- IPv6: `::1`, `2001:db8::/32`
 
 ---
 

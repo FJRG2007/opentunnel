@@ -58,13 +58,11 @@ function loadEnvFile(): void {
                     value = value.slice(1, -1);
                 }
                 // Only set if not already defined in environment
-                if (process.env[key] === undefined) {
-                    process.env[key] = value;
-                }
+                if (process.env[key] === undefined) process.env[key] = value;
             }
         }
     }
-}
+};
 
 // Docker-style environment variable substitution
 // Supports: ${VAR}, ${VAR:-default}, ${VAR:=default}
@@ -75,21 +73,16 @@ function substituteEnvVars(content: string): string {
     return content.replace(pattern, (match, varName, operator, defaultValue) => {
         const envValue = process.env[varName];
 
-        if (operator === ":-" || operator === ":=") {
-            // Use default if variable is unset or empty
-            return (envValue !== undefined && envValue !== "") ? envValue : (defaultValue || "");
-        }
+        if (operator === ":-" || operator === ":=") return (envValue !== undefined && envValue !== "") ? envValue : (defaultValue || "");
 
         // Just ${VAR} - return value or empty string
         return envValue || "";
     });
-}
+};
 
 // Load and parse config file with environment variable substitution
 function loadConfig(configPath: string): OpenTunnelConfig | null {
-    if (!fs.existsSync(configPath)) {
-        return null;
-    }
+    if (!fs.existsSync(configPath)) return null;
 
     // Load .env file first
     loadEnvFile();
@@ -99,7 +92,7 @@ function loadConfig(configPath: string): OpenTunnelConfig | null {
     content = substituteEnvVars(content);
 
     return parseYaml(content) as OpenTunnelConfig;
-}
+};
 
 const program = new Command();
 
@@ -107,7 +100,7 @@ program
     .name("opentunnel")
     .alias("ot")
     .description("Expose local ports to the internet via custom domains or ngrok")
-    .version("1.0.0");
+    .version("1.0.10");
 
 // Helper function to build WebSocket URL from domain
 // User only provides base domain (e.g., fjrg2007.com), system handles the rest
@@ -177,7 +170,7 @@ program
                 token: options.token,
                 reconnect: true,
                 silent: true,
-                rejectUnauthorized: !insecure,
+                rejectUnauthorized: !insecure
             });
 
             await client.connect();
@@ -214,9 +207,7 @@ program
                     tunnelId = result.tunnelId;
                     publicUrl = result.publicUrl;
                     usedInsecure = true;
-                } else {
-                    throw firstErr;
-                }
+                } else throw firstErr;
             }
 
             spinner.succeed("Tunnel established!");
@@ -225,9 +216,7 @@ program
             console.log(chalk.cyan(`  OpenTunnel ${chalk.gray(`(via ${serverDisplayName})`)}`));
             console.log(chalk.gray("  ─────────────────────────────────────────"));
             console.log(`  ${chalk.white("Status:")}    ${chalk.green("● Online")}`);
-            if (usedInsecure && !options.insecure) {
-                console.log(`  ${chalk.white("Security:")} ${chalk.yellow("⚠ Insecure (self-signed cert)")}`);
-            }
+            if (usedInsecure && !options.insecure) console.log(`  ${chalk.white("Security:")} ${chalk.yellow("⚠ Insecure (self-signed cert)")}`);
             console.log(`  ${chalk.white("Protocol:")}  ${chalk.yellow(options.protocol.toUpperCase())}`);
             console.log(`  ${chalk.white("Local:")}     ${chalk.gray(`${options.host}:${port}`)}`);
             console.log(`  ${chalk.white("Public:")}    ${chalk.green(publicUrl)}`);
@@ -367,7 +356,7 @@ program
                 subdomain,
                 serverUrl,
                 token: options.token,
-                insecure: true,
+                insecure: true
             });
 
         } catch (error: any) {
@@ -398,7 +387,7 @@ program
                 localPort: parseInt(port),
                 remotePort: options.remotePort ? parseInt(options.remotePort) : undefined,
                 authtoken: options.token,
-                region: options.region,
+                region: options.region
             });
             return;
         }
@@ -413,7 +402,7 @@ program
                 remotePort: options.remotePort ? parseInt(options.remotePort) : undefined,
                 serverUrl,
                 token: options.token,
-                insecure: options.insecure,
+                insecure: options.insecure
             });
             return;
         }
@@ -441,7 +430,7 @@ program
             domain,
             basePath: "op",
             tunnelPortRange: { min: 10000, max: 20000 },
-            selfSignedHttps: { enabled: true },
+            selfSignedHttps: { enabled: true }
         });
 
         try {
@@ -460,7 +449,7 @@ program
                 remotePort: options.remotePort ? parseInt(options.remotePort) : undefined,
                 serverUrl,
                 token: options.token,
-                insecure: true,
+                insecure: true
             });
 
         } catch (error: any) {
@@ -496,7 +485,7 @@ program
                 localHost: "localhost",
                 localPort: parseInt(port),
                 subdomain: options.subdomain,
-                authtoken: options.token,
+                authtoken: options.token
             });
         } else {
             await createTunnel({
@@ -506,7 +495,7 @@ program
                 subdomain: options.subdomain,
                 serverUrl,
                 token: options.token,
-                insecure: options.insecure,
+                insecure: options.insecure
             });
         }
     });
@@ -531,6 +520,9 @@ program
     .option("--production", "Use Let's Encrypt production (default: staging)")
     .option("--cloudflare-token <token>", "Cloudflare API token for DNS-01 challenge")
     .option("--duckdns-token <token>", "DuckDNS token for dynamic DNS updates")
+    .option("--ip-mode <mode>", "IP access mode: all, allowlist, denylist (default: all)")
+    .option("--ip-allow <ips>", "Comma-separated IPs/CIDRs to allow (e.g., 192.168.1.0/24,10.0.0.1)")
+    .option("--ip-deny <ips>", "Comma-separated IPs/CIDRs to deny")
     .option("-d, --detach", "Run server in background (detached mode)")
     .action(async (options) => {
         // Load config from opentunnel.yml if exists (with env variable substitution)
@@ -539,9 +531,7 @@ program
 
         try {
             const parsed = loadConfig(configPath);
-            if (parsed?.server && parsed.server.domain) {
-                fileConfig = parsed.server;
-            }
+            if (parsed?.server && parsed.server.domain) fileConfig = parsed.server;
         } catch (err) {
             // Ignore parse errors, use CLI options
         }
@@ -564,6 +554,9 @@ program
             production: options.production,
             cloudflareToken: options.cloudflareToken,
             duckdnsToken: options.duckdnsToken,
+            ipMode: options.ipMode || fileConfig.ipAccess?.mode || "all",
+            ipAllow: options.ipAllow || fileConfig.ipAccess?.allowList?.join(","),
+            ipDeny: options.ipDeny || fileConfig.ipAccess?.denyList?.join(","),
             detach: options.detach,
         };
         // Detached mode - run in background
@@ -603,6 +596,9 @@ program
             if (mergedOptions.production) args.push("--production");
             if (mergedOptions.cloudflareToken) args.push("--cloudflare-token", mergedOptions.cloudflareToken);
             if (mergedOptions.duckdnsToken) args.push("--duckdns-token", mergedOptions.duckdnsToken);
+            if (mergedOptions.ipMode && mergedOptions.ipMode !== "all") args.push("--ip-mode", mergedOptions.ipMode);
+            if (mergedOptions.ipAllow) args.push("--ip-allow", mergedOptions.ipAllow);
+            if (mergedOptions.ipDeny) args.push("--ip-deny", mergedOptions.ipDeny);
 
             const out = fsAsync.openSync(logFile, "a");
             const err = fsAsync.openSync(logFile, "a");
@@ -658,6 +654,13 @@ program
             };
         }
 
+        // Build IP access config
+        const ipAccessConfig = mergedOptions.ipMode !== "all" ? {
+            mode: mergedOptions.ipMode as "all" | "allowlist" | "denylist",
+            allowList: mergedOptions.ipAllow ? mergedOptions.ipAllow.split(",").map((ip: string) => ip.trim()) : undefined,
+            denyList: mergedOptions.ipDeny ? mergedOptions.ipDeny.split(",").map((ip: string) => ip.trim()) : undefined,
+        } : undefined;
+
         const server = new TunnelServer({
             port: parseInt(mergedOptions.port),
             publicPort: mergedOptions.publicPort ? parseInt(mergedOptions.publicPort) : undefined,
@@ -671,10 +674,11 @@ program
             auth: mergedOptions.authTokens
                 ? { required: true, tokens: mergedOptions.authTokens.split(",") }
                 : undefined,
+            ipAccess: ipAccessConfig,
             https: httpsConfig,
             selfSignedHttps: selfSignedHttpsConfig,
             autoHttps: autoHttpsConfig,
-            autoDns: detectDnsConfig(mergedOptions),
+            autoDns: detectDnsConfig(mergedOptions)
         });
 
         // Helper function to auto-detect DNS provider
@@ -691,7 +695,7 @@ program
                     cloudflareToken: opts.cloudflareToken,
                     createRecords: false,
                     deleteOnClose: false,
-                    setupWildcard: true,
+                    setupWildcard: true
                 };
             }
 
@@ -702,7 +706,7 @@ program
                     duckdnsToken: opts.duckdnsToken,
                     createRecords: false,
                     deleteOnClose: false,
-                    setupWildcard: false,
+                    setupWildcard: false
                 };
             }
 
@@ -758,9 +762,7 @@ program
             if (err.code === "ESRCH") {
                 fs.unlinkSync(pidFile);
                 console.log(chalk.yellow(`Server was not running (stale PID file removed)`));
-            } else {
-                console.log(chalk.red(`Failed to stop server: ${err.message}`));
-            }
+            } else console.log(chalk.red(`Failed to stop server: ${err.message}`));
         }
     });
 
@@ -793,9 +795,7 @@ program
                     // Fallback: just read the file
                     console.log(fs.readFileSync(logFile, "utf-8"));
                 });
-            } else {
-                spawn("tail", ["-f", "-n", options.lines, logFile], { stdio: "inherit" });
-            }
+            } else spawn("tail", ["-f", "-n", options.lines, logFile], { stdio: "inherit" });
         } else {
             const content = fs.readFileSync(logFile, "utf-8");
             const lines = content.split("\n");
@@ -1301,10 +1301,8 @@ program
 
         // Also include the server PID
         const serverPidFile = ".opentunnel.pid";
-        if (fs.existsSync(path.join(process.cwd(), serverPidFile))) {
-            pidFiles.push(serverPidFile);
-        }
-
+        if (fs.existsSync(path.join(process.cwd(), serverPidFile))) pidFiles.push(serverPidFile);
+        
         if (pidFiles.length === 0) {
             console.log(chalk.yellow("No tunnels running"));
             return;
@@ -1325,9 +1323,7 @@ program
                 if (err.code === "ESRCH") {
                     fs.unlinkSync(pidPath);
                     console.log(chalk.yellow(`  - ${name} was not running (cleaned up)`));
-                } else {
-                    console.log(chalk.red(`  ✗ Failed to stop ${name}: ${err.message}`));
-                }
+                } else console.log(chalk.red(`  ✗ Failed to stop ${name}: ${err.message}`));
             }
         }
 
@@ -1335,9 +1331,7 @@ program
         const logFiles = fs.readdirSync(process.cwd())
             .filter(f => f.startsWith("opentunnel") && f.endsWith(".log"));
 
-        if (logFiles.length > 0) {
-            console.log(chalk.gray(`\nLog files preserved: ${logFiles.join(", ")}`));
-        }
+        if (logFiles.length > 0) console.log(chalk.gray(`\nLog files preserved: ${logFiles.join(", ")}`));
 
         console.log(chalk.green("\nAll tunnels stopped"));
     });
@@ -1350,8 +1344,7 @@ program
         const fs = await import("fs");
         const path = await import("path");
 
-        const pidFiles = fs.readdirSync(process.cwd())
-            .filter(f => f.startsWith(".opentunnel") && f.endsWith(".pid"));
+        const pidFiles = fs.readdirSync(process.cwd()).filter(f => f.startsWith(".opentunnel") && f.endsWith(".pid"));
 
         if (pidFiles.length === 0) {
             console.log(chalk.yellow("No tunnels running"));
@@ -1456,13 +1449,13 @@ program
                         method,
                         url,
                         headers: req.headers,
-                        body: body || undefined,
+                        body: body || undefined
                     },
                     server: {
                         port,
                         timestamp,
-                        uptime: process.uptime(),
-                    },
+                        uptime: process.uptime()
+                    }
                 };
 
                 res.writeHead(200, {
@@ -1511,10 +1504,7 @@ program
         if (options.port) {
             const specific = `.test-server-${options.port}.pid`;
             pidFiles = fs.existsSync(path.join(process.cwd(), specific)) ? [specific] : [];
-        } else {
-            pidFiles = fs.readdirSync(process.cwd())
-                .filter(f => f.startsWith(".test-server-") && f.endsWith(".pid"));
-        }
+        } else pidFiles = fs.readdirSync(process.cwd()).filter(f => f.startsWith(".test-server-") && f.endsWith(".pid"));
 
         if (pidFiles.length === 0) {
             console.log(chalk.yellow("No test servers running"));
@@ -1585,7 +1575,7 @@ async function runTunnelInBackgroundFromConfig(
     fs.writeFileSync(pidFile, String(child.pid));
 
     console.log(chalk.green(`  ✓ ${name}: started (PID: ${child.pid})`));
-}
+};
 
 async function startTunnelsFromConfig(
     tunnels: TunnelConfigYaml[],
@@ -1681,7 +1671,7 @@ async function startTunnelsFromConfig(
         spinner.fail(`Failed: ${err.message}`);
         process.exit(1);
     }
-}
+};
 
 async function runTunnelInBackground(command: string, port: string, options: any): Promise<void> {
     const { spawn } = await import("child_process");
@@ -1757,7 +1747,7 @@ async function runTunnelInBackground(command: string, port: string, options: any
     console.log("");
     console.log(chalk.gray(`Stop with:  kill ${child.pid}`));
     console.log(chalk.gray(`Check:      tail -f ${logFile}`));
-}
+};
 
 interface TunnelOptions {
     protocol: TunnelProtocol;
@@ -1848,7 +1838,7 @@ async function createTunnel(options: TunnelOptions): Promise<void> {
         spinner.fail(`Failed: ${err.message}`);
         process.exit(1);
     }
-}
+};
 
 async function createNgrokTunnel(options: NgrokOptions): Promise<void> {
     const spinner = ora("Starting ngrok...").start();
@@ -1907,7 +1897,7 @@ async function createNgrokTunnel(options: NgrokOptions): Promise<void> {
         console.log(chalk.yellow("\nMake sure ngrok is installed: https://ngrok.com/download"));
         process.exit(1);
     }
-}
+};
 
 function printTunnelInfo(info: {
     status: string;
@@ -1928,6 +1918,6 @@ function printTunnelInfo(info: {
     console.log("");
     console.log(chalk.gray("  Press Ctrl+C to close the tunnel"));
     console.log("");
-}
+};
 
 program.parse();

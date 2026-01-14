@@ -15,6 +15,7 @@ import {
     TunnelRequestMessage,
     AuthMessage,
     DnsProvider,
+    IpAccessConfig,
 } from "../shared/types";
 import {
     generateId,
@@ -111,6 +112,72 @@ export class TunnelServer extends EventEmitter {
                 socket.destroy();
             }
         });
+    }
+
+    // Check if an IP matches a CIDR range or single IP
+    private ipMatchesCidr(ip: string, cidr: string): boolean {
+        // Normalize IPv6-mapped IPv4 addresses
+        const normalizedIp = ip.replace(/^::ffff:/, "");
+        const normalizedCidr = cidr.replace(/^::ffff:/, "");
+
+        // If it's a single IP (no /), do direct comparison
+        if (!normalizedCidr.includes("/")) {
+            return normalizedIp === normalizedCidr;
+        }
+
+        const [range, bits] = normalizedCidr.split("/");
+        const mask = parseInt(bits, 10);
+
+        // Convert IP addresses to numbers for comparison
+        const ipParts = normalizedIp.split(".").map(Number);
+        const rangeParts = range.split(".").map(Number);
+
+        if (ipParts.length !== 4 || rangeParts.length !== 4) {
+            // Not valid IPv4, try simple string match
+            return normalizedIp === range;
+        }
+
+        const ipNum = (ipParts[0] << 24) | (ipParts[1] << 16) | (ipParts[2] << 8) | ipParts[3];
+        const rangeNum = (rangeParts[0] << 24) | (rangeParts[1] << 16) | (rangeParts[2] << 8) | rangeParts[3];
+        const maskNum = ~((1 << (32 - mask)) - 1);
+
+        return (ipNum & maskNum) === (rangeNum & maskNum);
+    }
+
+    // Check if an IP is in a list (supports CIDR notation)
+    private ipInList(ip: string, list: string[]): boolean {
+        return list.some(entry => this.ipMatchesCidr(ip, entry));
+    }
+
+    // Check if an IP is allowed based on the access config
+    private isIpAllowed(ip: string): { allowed: boolean; reason?: string } {
+        const config = this.config.ipAccess;
+
+        // Default: allow all
+        if (!config || config.mode === "all") {
+            return { allowed: true };
+        }
+
+        // Normalize IP
+        const normalizedIp = ip.replace(/^::ffff:/, "");
+
+        if (config.mode === "allowlist") {
+            // Only allow IPs in the allowList
+            if (config.allowList && this.ipInList(normalizedIp, config.allowList)) {
+                return { allowed: true };
+            }
+            return { allowed: false, reason: `IP ${normalizedIp} not in allowlist` };
+        }
+
+        if (config.mode === "denylist") {
+            // Deny IPs in the denyList, allow others
+            if (config.denyList && this.ipInList(normalizedIp, config.denyList)) {
+                return { allowed: false, reason: `IP ${normalizedIp} is in denylist` };
+            }
+            return { allowed: true };
+        }
+
+        return { allowed: true };
     }
 
     private async setupHttps(): Promise<void> {
@@ -424,6 +491,19 @@ export class TunnelServer extends EventEmitter {
     }
 
     private handleConnection(ws: WebSocket, request: IncomingMessage): void {
+        // Get client IP from request
+        const clientIp = request.socket.remoteAddress ||
+                        request.headers["x-forwarded-for"]?.toString().split(",")[0].trim() ||
+                        "unknown";
+
+        // Check IP access control
+        const ipCheck = this.isIpAllowed(clientIp);
+        if (!ipCheck.allowed) {
+            this.logger.warn(`Connection denied for IP ${clientIp}: ${ipCheck.reason}`);
+            ws.close(1008, "Access denied"); // 1008 = Policy Violation
+            return;
+        }
+
         const clientId = generateId();
         const client: Client = {
             id: clientId,
@@ -436,7 +516,7 @@ export class TunnelServer extends EventEmitter {
         };
 
         this.clients.set(clientId, client);
-        this.logger.info(`Client connected: ${clientId}`);
+        this.logger.info(`Client connected: ${clientId} (IP: ${clientIp})`);
 
         // Handle WebSocket-level pong (response to our ping)
         ws.on("pong", () => {

@@ -65,9 +65,7 @@ export function getNextAvailablePort(
     usedPorts: Set<number>
 ): number | null {
     for (let port = min; port <= max; port++) {
-        if (!usedPorts.has(port)) {
-            return port;
-        }
+        if (!usedPorts.has(port)) return port;
     }
     return null;
 };
@@ -100,21 +98,21 @@ export class Logger {
 
     setSilent(silent: boolean): void {
         this.silent = silent;
-    }
+    };
 
     info(message: string, ...args: any[]): void {
         if (!this.silent) console.log(`[${this.prefix}] ${message}`, ...args);
-    }
+    };
 
     error(message: string, ...args: any[]): void {
         if (!this.silent) console.error(`[${this.prefix}] ERROR: ${message}`, ...args);
-    }
+    };
 
     warn(message: string, ...args: any[]): void {
         if (!this.silent) console.warn(`[${this.prefix}] WARN: ${message}`, ...args);
-    }
+    };
 
     log(message: string, ...args: any[]): void {
         if (!this.silent && this.debug) console.log(`[${this.prefix}] DEBUG: ${message}`, ...args);
-    }
+    };
 };
