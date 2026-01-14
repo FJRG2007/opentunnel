@@ -45,12 +45,15 @@ export class TunnelClient extends EventEmitter {
     private tunnels: Map<string, ActiveTunnel> = new Map();
     private pendingTunnels: Map<string, PendingTunnel> = new Map();
     private reconnectAttempts = 0;
-    private maxReconnectAttempts = 10;
     private logger: Logger;
     private closed = false;
     private pingInterval: NodeJS.Timeout | null = null;
     private pongTimeout: NodeJS.Timeout | null = null;
     private lastPongTime: number = Date.now();
+
+    // Reconnection settings
+    private readonly baseReconnectInterval = 1000;  // Start with 1 second
+    private readonly maxReconnectInterval = 30000;  // Max 30 seconds between attempts
 
     constructor(config: Partial<ClientConfig>) {
         super();
@@ -220,25 +223,42 @@ export class TunnelClient extends EventEmitter {
     }
 
     private async attemptReconnect(): Promise<void> {
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            this.logger.error("Max reconnect attempts reached");
-            this.emit("reconnect_failed");
+        if (this.closed) {
             return;
         }
 
         this.reconnectAttempts++;
-        this.logger.info(`Reconnecting... (attempt ${this.reconnectAttempts})`);
 
-        await sleep(this.config.reconnectInterval);
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (max)
+        const delay = Math.min(
+            this.baseReconnectInterval * Math.pow(2, this.reconnectAttempts - 1),
+            this.maxReconnectInterval
+        );
+
+        this.logger.info(`Reconnecting in ${delay / 1000}s... (attempt ${this.reconnectAttempts})`);
+        this.emit("reconnecting", { attempt: this.reconnectAttempts, delay });
+
+        await sleep(delay);
+
+        if (this.closed) {
+            return;
+        }
 
         try {
             await this.connect();
             // Re-establish tunnels
-            for (const tunnel of this.tunnels.values()) {
-                await this.createTunnel(tunnel.config);
+            const tunnelsToRestore = Array.from(this.tunnels.values());
+            for (const tunnel of tunnelsToRestore) {
+                try {
+                    await this.createTunnel(tunnel.config);
+                    this.logger.info(`Tunnel restored: ${tunnel.publicUrl}`);
+                } catch (err: any) {
+                    this.logger.error(`Failed to restore tunnel: ${err.message}`);
+                }
             }
+            this.emit("reconnected", { attempts: this.reconnectAttempts });
         } catch {
-            // Will retry on close event
+            // Will retry on close event (infinite retry)
         }
     }
 
