@@ -8,6 +8,8 @@
 
 - [As a Client](#-as-a-client) - Expose your local ports
 - [As a Server](#-as-a-server) - Host your own tunnel server
+- [Home Use](#-home-use-behind-routernat) - Run from home network
+- [Multi-Domain Support](#-multi-domain-support) - Handle multiple domains on one server
 - [Authentication](#-authentication) - Secure your server
 - [IP Access Control](#-ip-access-control) - Allow/deny IPs and CIDR ranges
 - [Configuration File](#-configuration-file) - opentunnel.yml reference
@@ -24,7 +26,7 @@ Use OpenTunnel to expose your local services to the internet. Connect to any Ope
 
 ```bash
 # NPM (recommended)
-npm install -g opentunnel-cli
+npm cache clean --force && npm install -g opentunnel-cli
 
 # Or use without installing
 npx opentunnel-cli quick 3000 -s example.com
@@ -50,12 +52,13 @@ Your local port 3000 is now accessible from the internet:
 
 **Options:**
 ```bash
-opentunnel quick 3000 -s example.com                  # Basic HTTP tunnel
-opentunnel quick 3000 -s example.com -n myapp         # Custom subdomain
-opentunnel quick 5432 -s example.com -p tcp           # TCP tunnel
-opentunnel quick 3000 -s example.com -t SECRET        # With auth token
-opentunnel quick 3000 -s example.com --insecure       # Self-signed cert
-opentunnel quick 3000 -s example.com -b ""            # No basePath (direct domain)
+opentunnel quick 3000 -s example.com                    # Basic HTTP tunnel
+opentunnel quick 3000 --domain example.com -n myapp     # Custom subdomain
+opentunnel quick 5432 -s example.com -p tcp             # TCP tunnel
+opentunnel quick 3000 -s example.com -t SECRET          # With auth token
+opentunnel quick 3000 -s example.com --insecure         # Self-signed cert
+opentunnel quick 3000 -s example.com -b ""              # No basePath (direct domain)
+opentunnel quick 3000 -s yourdomain.com --local-server  # Start server + tunnel in one terminal
 ```
 
 ### Option 2: HTTP/TCP Commands
@@ -65,12 +68,14 @@ More control with specific commands:
 ```bash
 # HTTP tunnel
 opentunnel http 3000 -s example.com
+opentunnel http 3000 --domain example.com --subdomain myapp
 
 # With authentication
 opentunnel http 3000 -s example.com -t SECRET
 
 # TCP tunnel
 opentunnel tcp 5432 -s example.com -r 15432
+opentunnel tcp 5432 --domain example.com --remote-port 15432
 ```
 
 ### Option 3: Using Config File
@@ -141,7 +146,7 @@ Tunnels will be available at: `https://myapp.op.example.com`
 
 ```bash
 # Install
-npm install -g opentunnel-cli
+npm cache clean --force && npm install -g opentunnel-cli
 
 # Start public server (anyone can connect)
 opentunnel server -d --domain example.com --letsencrypt --email admin@example.com
@@ -266,6 +271,189 @@ opentunnel server -d --domain example.com --letsencrypt --email admin@example.co
 Clients must provide a token:
 ```bash
 opentunnel quick 3000 -s example.com -t token1
+```
+
+---
+
+# 🏠 Home Use (Behind Router/NAT)
+
+If you want to run OpenTunnel server from your home network, you need to configure your router properly.
+
+## Step 1: Static Internal IP
+
+First, assign a static IP to your computer in your router's DHCP settings. This prevents your IP from changing after a reboot.
+
+**Example:** `192.168.1.134`
+
+Most routers have this in: **Settings → LAN → DHCP Reservation** or **Address Reservation**
+
+## Step 2: Port Forwarding
+
+Configure your router to forward external ports to your computer:
+
+| Name | Protocol | WAN Port | LAN Host | LAN Port | Description |
+|------|----------|----------|----------|----------|-------------|
+| OpenTunnel HTTP | TCP/UDP | 80 | 192.168.1.134 | 8080 | Let's Encrypt HTTP-01 challenge |
+| OpenTunnel HTTPS | TCP | 443 | 192.168.1.134 | 443 | Main HTTPS traffic |
+| OpenTunnel TCP | TCP/UDP | 10000-20000 | 192.168.1.134 | 10000-20000 | TCP tunnel ports |
+
+> **Note:** Replace `192.168.1.134` with your computer's static IP.
+
+## Step 3: Dynamic DNS (Optional)
+
+If you don't have a static public IP, use a dynamic DNS service:
+
+- **DuckDNS** (free): `yourdomain.duckdns.org`
+- **Cloudflare** (free tier): Use with your own domain
+- **No-IP**, **DynDNS**, etc.
+
+## Step 4: Start the Server
+
+```bash
+# With Let's Encrypt (recommended)
+opentunnel server -d --domain yourdomain.duckdns.org --letsencrypt --email you@email.com --production
+
+# With self-signed certificate (for testing)
+opentunnel server -d --domain yourdomain.duckdns.org
+```
+
+## Step 5: Connect from Anywhere
+
+From any other network:
+
+```bash
+opentunnel quick 3000 -s yourdomain.duckdns.org
+```
+
+## Quick Hybrid Mode (Server + Tunnel in One)
+
+For the simplest setup, expose a local port while running the server:
+
+```bash
+# Start server + tunnel in one command
+opentunnel quick 3000 -s yourdomain.duckdns.org --local-server
+
+# Or with config file
+opentunnel init --hybrid
+opentunnel up
+```
+
+## Troubleshooting
+
+**Ports not accessible from outside:**
+1. Check your ISP doesn't block ports 80/443 (some do for residential)
+2. Verify port forwarding rules are active
+3. Test from a different network (not from inside your home network)
+4. Check Windows Firewall / Linux iptables rules
+
+**Use alternative ports if ISP blocks 80/443:**
+```bash
+opentunnel server -d --domain yourdomain.com -p 8443 --public-port 8443
+```
+
+---
+
+# 🌐 Multi-Domain Support
+
+OpenTunnel can handle **multiple domains** on a single server instance. This is useful when you want to:
+
+- Serve tunnels under different domain names
+- Use different base paths for different domains
+- Consolidate multiple domains on one server
+
+## DNS Configuration
+
+For each domain you want to use, create DNS records pointing to your server:
+
+| Domain | Type | Name | Value |
+|--------|------|------|-------|
+| `domain1.com` | A | `op` | `YOUR_SERVER_IP` |
+| `domain1.com` | A | `*.op` | `YOUR_SERVER_IP` |
+| `domain2.com` | A | `op` | `YOUR_SERVER_IP` |
+| `domain2.com` | A | `*.op` | `YOUR_SERVER_IP` |
+
+## Configuration
+
+Configure multiple domains in `opentunnel.yml`:
+
+```yaml
+server:
+  domains:
+    - domain: domain1.com
+      basePath: op              # Tunnels at: *.op.domain1.com
+    - domain: domain2.com
+      basePath: op              # Tunnels at: *.op.domain2.com
+  port: 443
+
+tunnels:
+  - name: app
+    protocol: http
+    port: 3000
+    subdomain: myapp            # Accessible on ALL configured domains
+```
+
+With this configuration, the tunnel `myapp` is accessible at:
+- `https://myapp.op.domain1.com`
+- `https://myapp.op.domain2.com`
+
+## Single Domain (Backward Compatible)
+
+If you only need one domain, use the simple configuration:
+
+```yaml
+server:
+  domain: example.com           # Single domain
+  basePath: op                  # Default: op
+```
+
+This is equivalent to:
+
+```yaml
+server:
+  domains:
+    - domain: example.com
+      basePath: op
+```
+
+## SSL Certificates
+
+When using self-signed certificates with multiple domains, OpenTunnel automatically generates a **SAN (Subject Alternative Name) certificate** that covers all configured domains and their wildcards.
+
+For Let's Encrypt, you'll need separate certificates or a multi-domain certificate with all your domains listed.
+
+## Use Cases
+
+### Different Teams/Projects
+
+```yaml
+server:
+  domains:
+    - domain: dev.company.com
+      basePath: op              # Dev team: *.op.dev.company.com
+    - domain: staging.company.com
+      basePath: op              # Staging: *.op.staging.company.com
+```
+
+### White-Label Service
+
+```yaml
+server:
+  domains:
+    - domain: client1.com
+      basePath: op              # Client 1: *.op.client1.com
+    - domain: client2.com
+      basePath: op              # Client 2: *.op.client2.com
+```
+
+### Migration Between Domains
+
+```yaml
+server:
+  domains:
+    - domain: newdomain.com
+      basePath: op              # New domain (primary)
+    - domain: olddomain.com
+      basePath: op              # Old domain (still supported)
 ```
 
 ---
@@ -441,6 +629,38 @@ server:
   # tcpPortMax: 20000
 ```
 
+## Hybrid Mode (server + tunnels in one terminal)
+
+For home use or development, you can run the server AND expose local ports in the same terminal without needing a separate server process.
+
+```yaml
+mode: hybrid                             # Server + tunnels in one terminal
+
+server:
+  domain: ${DOMAIN:-example.com}         # Your domain
+  token: ${AUTH_TOKEN}                   # Optional
+
+tunnels:
+  - name: web
+    protocol: http
+    port: 3000
+    subdomain: web                       # → web.op.example.com
+
+  - name: api
+    protocol: http
+    port: 4000
+    subdomain: api                       # → api.op.example.com
+```
+
+```bash
+opentunnel up         # Starts server + all tunnels
+```
+
+**Quick hybrid start (no config file):**
+```bash
+opentunnel quick 3000 -s yourdomain.com --local-server
+```
+
 ## Commands
 
 ```bash
@@ -471,10 +691,10 @@ opentunnel ps         # Show running processes
 ## Quick Command
 
 ```bash
-opentunnel quick <port> -s <domain> [options]
+opentunnel quick <port> [options]
 
 Required:
-  -s, --server <domain>       Server base domain (e.g., example.com)
+  -s, --domain <domain>       Server domain (e.g., example.com)
 
 Options:
   -b, --base-path <path>      Server base path (default: op, empty for direct)
@@ -483,6 +703,8 @@ Options:
   -h, --host <host>           Local host (default: localhost)
   -t, --token <token>         Authentication token
   --insecure                  Skip SSL verification (self-signed certs)
+  --local-server              Start a local server (use with -s for your domain)
+  --server-port <port>        Port for local server (default: 443)
 ```
 
 ## HTTP/TCP Commands
@@ -491,14 +713,34 @@ Options:
 opentunnel http <port> [options]
 opentunnel tcp <port> [options]
 
+Required:
+  -s, --domain <domain>       Server domain (e.g., example.com)
+
 Options:
-  -s, --server <domain>       Server base domain (e.g., example.com)
   -b, --base-path <path>      Server base path (default: op)
   -t, --token <token>         Authentication token
   -n, --subdomain <name>      Custom subdomain
   -h, --host <host>           Local host (default: localhost)
   -r, --remote-port <port>    Remote TCP port (tcp only)
-  -d, --detach                Run in background
+  --insecure                  Skip SSL verification
+```
+
+## Background Mode
+
+Run multiple instances in the background:
+
+```bash
+# Start instances
+opentunnel up -d                    # Default instance
+opentunnel up production -d         # Named instance "production"
+opentunnel up staging -d            # Named instance "staging"
+
+# List running instances
+opentunnel ps
+
+# Stop instances
+opentunnel down production          # Stop specific instance
+opentunnel down                     # Stop all instances
 ```
 
 ---

@@ -138,12 +138,19 @@ export interface IpAccessConfig {
     denyList?: string[];          // IPs or CIDR ranges to deny
 }
 
+// Domain configuration for multi-domain support
+export interface DomainConfig {
+    domain: string;
+    basePath: string;
+}
+
 // Server configuration
 export interface ServerConfig {
     port: number;
     publicPort?: number; // Port shown in public URLs (default: same as port)
     host: string;
-    domain: string;
+    domain: string;      // Primary domain (backward compatible)
+    domains?: DomainConfig[];  // Multiple domains support
     basePath: string;
     https?: {
         cert: string;

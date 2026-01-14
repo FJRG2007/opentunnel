@@ -1,3 +1,5 @@
+name: demo-server
+
 server:
   domain: ${DOMAIN:-fjrg2007.com}
   token: ${AUTH_TOKEN}                      # From .env (optional for public server)

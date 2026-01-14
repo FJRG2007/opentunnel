@@ -25,9 +25,12 @@ import {
     encodeBase64,
     decodeBase64,
     extractSubdomain,
+    extractSubdomainMulti,
+    DomainMatch,
     getNextAvailablePort,
     Logger,
 } from "../shared/utils";
+import { DomainConfig } from "../shared/types";
 import { CertManager } from "./CertManager";
 import { CloudflareDNS } from "../dns/CloudflareDNS";
 import { DuckDNS } from "../dns/DuckDNS";
@@ -65,6 +68,7 @@ interface PendingRequest {
 
 export class TunnelServer extends EventEmitter {
     private config: ServerConfig;
+    private domains: DomainConfig[] = [];  // Multi-domain support
     private httpServer: http.Server | https.Server;
     private httpRedirectServer: http.Server | null = null;
     private wss: WebSocketServer;
@@ -90,6 +94,17 @@ export class TunnelServer extends EventEmitter {
             ...config,
         };
         this.logger = new Logger("Server");
+
+        // Initialize multi-domain support
+        if (this.config.domains && this.config.domains.length > 0) {
+            this.domains = this.config.domains;
+        } else {
+            // Single domain (backward compatible)
+            this.domains = [{
+                domain: this.config.domain,
+                basePath: this.config.basePath,
+            }];
+        }
 
         // Create HTTP server initially (will be upgraded to HTTPS if needed)
         this.httpServer = http.createServer();
@@ -197,9 +212,9 @@ export class TunnelServer extends EventEmitter {
                 certsDir: this.config.selfSignedHttps.certsDir,
             });
 
-            // Generate self-signed certificate for the domain
-            const domain = `${this.config.basePath}.${this.config.domain}`;
-            const certInfo = this.certManager.getOrCreateSelfSignedCert(domain);
+            // Generate self-signed certificate for all configured domains
+            const certDomains = this.domains.map(d => `${d.basePath}.${d.domain}`);
+            const certInfo = this.certManager.getOrCreateSelfSignedCert(certDomains);
 
             this.httpServer = https.createServer({
                 cert: certInfo.cert,
@@ -208,6 +223,7 @@ export class TunnelServer extends EventEmitter {
 
             this.isHttps = true;
             this.logger.info(`Self-signed certificate valid until: ${certInfo.expiresAt.toISOString()}`);
+            this.logger.info(`Certificate covers: ${certDomains.join(", ")}`);
             this.logger.warn("⚠️  Using self-signed certificate - browsers will show security warning");
         } else if (this.config.autoHttps?.enabled) {
             // Automatic HTTPS with Let's Encrypt
@@ -327,8 +343,12 @@ export class TunnelServer extends EventEmitter {
             this.httpServer.listen(port, this.config.host, () => {
                 const protocol = this.isHttps ? "https" : "http";
                 this.logger.info(`Server started on ${this.config.host}:${port} (${protocol.toUpperCase()})`);
-                this.logger.info(`Domain: ${this.config.domain}`);
-                this.logger.info(`Subdomain pattern: *.${this.config.basePath}.${this.config.domain}`);
+
+                // Log all configured domains
+                for (const { domain, basePath } of this.domains) {
+                    this.logger.info(`Domain: ${domain}`);
+                    this.logger.info(`  Subdomain pattern: *.${basePath}.${domain}`);
+                }
 
                 if (this.isHttps) {
                     this.logger.info(`SSL: Enabled (Let's Encrypt)`);
@@ -639,9 +659,11 @@ export class TunnelServer extends EventEmitter {
                 return;
             }
 
+            // Use first configured domain as the primary
+            const primaryDomain = this.domains[0];
             const protocol = this.isHttps ? "https" : "http";
             // Third-level subdomain pattern: myapp.op.domain.com
-            publicUrl = `${protocol}://${subdomain}.${this.config.basePath}.${this.config.domain}`;
+            publicUrl = `${protocol}://${subdomain}.${primaryDomain.basePath}.${primaryDomain.domain}`;
 
             // Add port to URL only if not default (80 for http, 443 for https)
             const publicPort = this.config.publicPort || this.config.port;
@@ -664,7 +686,7 @@ export class TunnelServer extends EventEmitter {
             this.tunnelsBySubdomain.set(subdomain, tunnel);
             client.tunnels.set(tunnelId, tunnel);
 
-            this.logger.info(`HTTP tunnel: ${subdomain}.${this.config.basePath}.${this.config.domain} -> ${config.localHost}:${config.localPort}`);
+            this.logger.info(`HTTP tunnel: ${subdomain}.${primaryDomain.basePath}.${primaryDomain.domain} -> ${config.localHost}:${config.localPort}`);
 
             // Create DNS record if auto DNS is enabled (Cloudflare only)
             if (this.dnsProvider &&
@@ -826,8 +848,13 @@ export class TunnelServer extends EventEmitter {
         const hostWithoutPort = host.split(":")[0];
 
         // Check if this is a direct request to the server (API or status)
-        if (hostWithoutPort === this.config.domain ||
-            hostWithoutPort === `${this.config.basePath}.${this.config.domain}`) {
+        // Check against all configured domains
+        const isDirectRequest = this.domains.some(({ domain, basePath }) =>
+            hostWithoutPort === domain ||
+            hostWithoutPort === `${basePath}.${domain}`
+        );
+
+        if (isDirectRequest) {
             if (req.url?.startsWith("/api/")) {
                 this.handleApiRequest(req, res);
                 return;
@@ -839,26 +866,28 @@ export class TunnelServer extends EventEmitter {
                 name: "OpenTunnel Server",
                 version: "1.0.0",
                 status: "running",
-                domain: this.config.domain,
-                subdomainPattern: `*.${this.config.basePath}.${this.config.domain}`,
+                domains: this.domains.map(d => ({
+                    domain: d.domain,
+                    pattern: `*.${d.basePath}.${d.domain}`,
+                })),
                 tunnels: this.getTunnelCount(),
                 clients: this.clients.size,
             }));
             return;
         }
 
-        // Find tunnel by subdomain (pattern: subdomain.op.domain.com)
-        const subdomain = extractSubdomain(hostWithoutPort, this.config.domain, this.config.basePath);
-        if (!subdomain) {
+        // Find tunnel by subdomain using multi-domain matching
+        const match = extractSubdomainMulti(hostWithoutPort, this.domains);
+        if (!match) {
             res.writeHead(404, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Tunnel not found" }));
             return;
         }
 
-        const tunnel = this.tunnelsBySubdomain.get(subdomain);
+        const tunnel = this.tunnelsBySubdomain.get(match.subdomain);
         if (!tunnel) {
             res.writeHead(404, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: `Tunnel '${subdomain}' not found` }));
+            res.end(JSON.stringify({ error: `Tunnel '${match.subdomain}' not found` }));
             return;
         }
 

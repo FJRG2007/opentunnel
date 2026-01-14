@@ -346,15 +346,17 @@ export class CertManager {
 
     /**
      * Generate a self-signed certificate for local/development use.
-     * No external dependencies required.
+     * Supports multiple domains with SAN (Subject Alternative Name) entries.
      */
-    generateSelfSignedCertificate(domain: string, options?: {
+    generateSelfSignedCertificate(domains: string | string[], options?: {
         validDays?: number;
         organization?: string;
     }): CertificateInfo {
+        const domainList = Array.isArray(domains) ? domains : [domains];
+        const primaryDomain = domainList[0];
         const validDays = options?.validDays || 365;
         const org = options?.organization || "OpenTunnel";
-        const safeDomain = domain.replace("*.", "wildcard.");
+        const safeDomain = primaryDomain.replace("*.", "wildcard.");
 
         const certPath = path.join(this.certsDir, `${safeDomain}.crt`);
         const keyPath = path.join(this.certsDir, `${safeDomain}.key`);
@@ -369,7 +371,7 @@ export class CertManager {
                 // If still valid (with 7 day buffer), use it
                 const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
                 if (expiresAt.getTime() - Date.now() > sevenDaysMs) {
-                    this.logger.info(`Using existing self-signed certificate for ${domain}`);
+                    this.logger.info(`Using existing self-signed certificate for ${primaryDomain}`);
                     return {
                         cert: fs.readFileSync(certPath, "utf-8"),
                         key: fs.readFileSync(keyPath, "utf-8"),
@@ -382,7 +384,7 @@ export class CertManager {
             }
         }
 
-        this.logger.info(`Generating self-signed certificate for ${domain}...`);
+        this.logger.info(`Generating self-signed certificate for ${domainList.join(", ")}...`);
 
         // Generate key pair using node-forge
         const keys = forge.pki.rsa.generateKeyPair(2048);
@@ -400,11 +402,27 @@ export class CertManager {
 
         // Set subject and issuer (self-signed, so they're the same)
         const attrs = [
-            { name: "commonName", value: domain },
+            { name: "commonName", value: primaryDomain },
             { name: "organizationName", value: org },
         ];
         cert.setSubject(attrs);
         cert.setIssuer(attrs);
+
+        // Build SAN entries for all domains and their wildcards
+        const altNames: { type: number; value: string }[] = [];
+        const allDomains: string[] = [];
+
+        for (const domain of domainList) {
+            altNames.push({ type: 2, value: domain }); // DNS
+            allDomains.push(domain);
+
+            // Add wildcard variant
+            const wildcardDomain = `*.${domain.replace("*.", "")}`;
+            if (!allDomains.includes(wildcardDomain)) {
+                altNames.push({ type: 2, value: wildcardDomain }); // Wildcard DNS
+                allDomains.push(wildcardDomain);
+            }
+        }
 
         // Set extensions for proper SSL/TLS usage
         cert.setExtensions([
@@ -424,10 +442,7 @@ export class CertManager {
             },
             {
                 name: "subjectAltName",
-                altNames: [
-                    { type: 2, value: domain }, // DNS
-                    { type: 2, value: `*.${domain.replace("*.", "")}` }, // Wildcard DNS
-                ],
+                altNames,
             },
         ]);
 
@@ -444,7 +459,7 @@ export class CertManager {
 
         // Save metadata
         fs.writeFileSync(metaPath, JSON.stringify({
-            domains: [domain, `*.${domain.replace("*.", "")}`],
+            domains: allDomains,
             expiresAt: expiresAt.toISOString(),
             issuedAt: now.toISOString(),
             selfSigned: true,
@@ -456,15 +471,16 @@ export class CertManager {
             cert: certPem,
             key: keyPem,
             expiresAt,
-            domains: [domain],
+            domains: allDomains,
         };
     }
 
     /**
-     * Get or generate a self-signed certificate for the given domain.
+     * Get or generate a self-signed certificate for the given domain(s).
      * This is the main entry point for automatic local HTTPS.
+     * Supports both single domain (string) and multiple domains (array).
      */
-    getOrCreateSelfSignedCert(domain: string): CertificateInfo {
-        return this.generateSelfSignedCertificate(domain);
+    getOrCreateSelfSignedCert(domains: string | string[]): CertificateInfo {
+        return this.generateSelfSignedCertificate(domains);
     }
 }

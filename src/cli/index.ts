@@ -22,12 +22,27 @@ interface TunnelConfigYaml {
     autostart?: boolean;
 }
 
+// Mode determines how OpenTunnel operates
+// - "server": Run as a tunnel server (accepts connections from clients)
+// - "client": Connect to a remote server and expose local ports
+// - "hybrid": Run server AND expose local ports in the same terminal
+type OpenTunnelMode = "server" | "client" | "hybrid";
+
+// Domain configuration for multi-domain support
+interface DomainConfig {
+    domain: string;
+    basePath?: string;  // Default: "op"
+}
+
 interface OpenTunnelConfig {
+    name?: string;                 // Instance name (shown in ps, used for pid/log files)
+    mode?: OpenTunnelMode;         // Explicitly set the mode (auto-detected if not set)
     server?: {
-        domain?: string;   // Run local server with this domain
+        domain?: string;   // Single domain (backward compatible)
+        domains?: (string | DomainConfig)[];  // Multiple domains
         remote?: string;   // Connect to remote server (e.g., "op.fjrg2007.com")
         port?: number;
-        basePath?: string;
+        basePath?: string; // Default basePath for single domain mode
         https?: boolean;
         token?: string;
         tcpPortMin?: number;
@@ -37,6 +52,86 @@ interface OpenTunnelConfig {
 }
 
 const CONFIG_FILE = "opentunnel.yml";
+
+// Global registry for tracking all running instances
+interface InstanceInfo {
+    name: string;
+    pid: number;
+    configPath: string;
+    logFile: string;
+    pidFile: string;
+    cwd: string;
+    startedAt: string;
+}
+
+interface GlobalRegistry {
+    instances: InstanceInfo[];
+}
+
+function getRegistryPath(): string {
+    const os = require("os");
+    const path = require("path");
+    const registryDir = path.join(os.homedir(), ".opentunnel");
+    return path.join(registryDir, "registry.json");
+}
+
+function loadRegistry(): GlobalRegistry {
+    const fs = require("fs");
+    const path = require("path");
+    const registryPath = getRegistryPath();
+
+    try {
+        // Ensure directory exists
+        const dir = path.dirname(registryPath);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+
+        if (fs.existsSync(registryPath)) {
+            return JSON.parse(fs.readFileSync(registryPath, "utf-8"));
+        }
+    } catch {}
+
+    return { instances: [] };
+}
+
+function saveRegistry(registry: GlobalRegistry): void {
+    const fs = require("fs");
+    const path = require("path");
+    const registryPath = getRegistryPath();
+
+    // Ensure directory exists
+    const dir = path.dirname(registryPath);
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+
+    fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2));
+}
+
+function registerInstance(info: InstanceInfo): void {
+    const registry = loadRegistry();
+    // Remove any existing entry with same name and cwd
+    registry.instances = registry.instances.filter(
+        i => !(i.name === info.name && i.cwd === info.cwd)
+    );
+    registry.instances.push(info);
+    saveRegistry(registry);
+}
+
+function unregisterInstance(name: string, cwd: string): void {
+    const registry = loadRegistry();
+    registry.instances = registry.instances.filter(
+        i => !(i.name === name && i.cwd === cwd)
+    );
+    saveRegistry(registry);
+}
+
+function unregisterInstanceByPid(pid: number): void {
+    const registry = loadRegistry();
+    registry.instances = registry.instances.filter(i => i.pid !== pid);
+    saveRegistry(registry);
+}
 
 // Load .env file if exists
 function loadEnvFile(): void {
@@ -100,7 +195,7 @@ program
     .name("opentunnel")
     .alias("ot")
     .description("Expose local ports to the internet via custom domains or ngrok")
-    .version("1.0.11");
+    .version("1.0.17");
 
 // Helper function to build WebSocket URL from domain
 // User only provides base domain (e.g., fjrg2007.com), system handles the rest
@@ -132,16 +227,67 @@ function buildServerUrl(server: string, basePath?: string): { url: string; displ
 program
     .command("quick <port>")
     .description("Instantly expose a local port to the internet")
-    .requiredOption("-s, --server <domain>", "Server domain (e.g., example.com)")
+    .option("-s, --domain <domain>", "Server domain (e.g., example.com)")
     .option("-b, --base-path <path>", "Server base path (default: op)")
     .option("-n, --subdomain <name>", "Request a specific subdomain (e.g., 'myapp')")
     .option("-p, --protocol <proto>", "Protocol (http, https, tcp)", "http")
     .option("-h, --host <host>", "Local host to forward to", "localhost")
     .option("-t, --token <token>", "Authentication token (if server requires it)")
     .option("--insecure", "Skip SSL certificate verification (for self-signed certs)")
+    .option("--local-server", "Start a local server before connecting")
+    .option("--server-port <port>", "Port for the local server (default: 443)", "443")
     .action(async (port: string, options) => {
-        // Build server URL from domain (user provides domain, system adds basePath)
-        const { url: serverUrl, displayName: serverDisplayName } = buildServerUrl(options.server, options.basePath);
+        // If --local-server flag is used, start a local server first
+        let localServer: any = null;
+        let serverUrl: string;
+        let serverDisplayName: string;
+
+        if (options.localServer) {
+            if (!options.domain) {
+                console.log(chalk.red("Error: --local-server requires -s/--domain to specify your domain"));
+                process.exit(1);
+            }
+
+            const { TunnelServer } = await import("../server/TunnelServer");
+            const serverPort = parseInt(options.serverPort);
+
+            console.log(chalk.cyan(`\nStarting local server on port ${serverPort}...`));
+
+            localServer = new TunnelServer({
+                port: serverPort,
+                host: "0.0.0.0",
+                domain: options.domain,
+                basePath: options.basePath || "op",
+                tunnelPortRange: { min: 10000, max: 20000 },
+                selfSignedHttps: { enabled: true },
+                auth: options.token ? { required: true, tokens: [options.token] } : undefined,
+            });
+
+            try {
+                await localServer.start();
+                console.log(chalk.green(`✓ Server running on port ${serverPort}\n`));
+            } catch (err: any) {
+                console.log(chalk.red(`Failed to start server: ${err.message}`));
+                process.exit(1);
+            }
+
+            // Connect to local server
+            serverUrl = `wss://localhost:${serverPort}/_tunnel`;
+            serverDisplayName = options.domain;
+            options.insecure = true; // Local server uses self-signed cert
+        } else {
+            if (!options.domain) {
+                console.log(chalk.red("Error: -s, --domain <domain> is required"));
+                console.log(chalk.gray("\nExamples:"));
+                console.log(chalk.cyan("  opentunnel quick 3000 -s example.com"));
+                console.log(chalk.cyan("  opentunnel quick 3000 --domain yourdomain.com --local-server"));
+                process.exit(1);
+            }
+            // Build server URL from domain (user provides domain, system adds basePath)
+            const result = buildServerUrl(options.domain, options.basePath);
+            serverUrl = result.url;
+            serverDisplayName = result.displayName;
+        }
 
         console.log(chalk.cyan(`
  ██████╗ ██████╗ ███████╗███╗   ██╗████████╗██╗   ██╗███╗   ██╗███╗   ██╗███████╗██╗
@@ -271,20 +417,19 @@ program
 program
     .command("http <port>")
     .description("Expose a local HTTP server")
-    .option("-s, --server <domain>", "Remote server domain (if not provided, starts local server)")
+    .option("-s, --domain <domain>", "Remote server domain (if not provided, starts local server)")
     .option("-b, --base-path <path>", "Server base path (default: op)")
     .option("-t, --token <token>", "Authentication token")
     .option("-n, --subdomain <name>", "Custom subdomain (e.g., 'myapp' for myapp.op.domain.com)")
     .option("-d, --detach", "Run tunnel in background")
     .option("-h, --host <host>", "Local host", "localhost")
-    .option("--domain <domain>", "Domain for the tunnel", "localhost")
-    .option("--port <port>", "Server port", "443")
+    .option("--server-port <port>", "Server port", "443")
     .option("--https", "Use HTTPS for local connection")
     .option("--insecure", "Skip SSL verification (for self-signed certs)")
     .option("--ngrok", "Use ngrok instead of OpenTunnel server")
     .option("--region <region>", "Ngrok region (us, eu, ap, au, sa, jp, in)", "us")
     .action(async (port: string, options) => {
-        if (options.ngrok || options.server === "ngrok") {
+        if (options.ngrok || options.domain === "ngrok") {
             await createNgrokTunnel({
                 protocol: options.https ? "https" : "http",
                 localHost: options.host,
@@ -297,8 +442,8 @@ program
         }
 
         // If remote server domain provided, just connect to it
-        if (options.server) {
-            const { url: serverUrl } = buildServerUrl(options.server, options.basePath);
+        if (options.domain) {
+            const { url: serverUrl } = buildServerUrl(options.domain, options.basePath);
             await createTunnel({
                 protocol: options.https ? "https" : "http",
                 localHost: options.host,
@@ -311,76 +456,29 @@ program
             return;
         }
 
-        // Start local server + tunnel (all-in-one)
-        const { TunnelServer } = await import("../server/TunnelServer");
-
-        const serverPort = parseInt(options.port);
-        const domain = options.domain;
-        const basePath = options.basePath;
-        const subdomain = options.subdomain || "app";
-
-        console.log(chalk.cyan(`
- ██████╗ ██████╗ ███████╗███╗   ██╗████████╗██╗   ██╗███╗   ██╗███╗   ██╗███████╗██╗
-██╔═══██╗██╔══██╗██╔════╝████╗  ██║╚══██╔══╝██║   ██║████╗  ██║████╗  ██║██╔════╝██║
-██║   ██║██████╔╝█████╗  ██╔██╗ ██║   ██║   ██║   ██║██╔██╗ ██║██╔██╗ ██║█████╗  ██║
-██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║   ██║   ██║   ██║██║╚██╗██║██║╚██╗██║██╔══╝  ██║
-╚██████╔╝██║     ███████╗██║ ╚████║   ██║   ╚██████╔╝██║ ╚████║██║ ╚████║███████╗███████╗
- ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚══════╝
-`));
-
-        const spinner = ora("Starting server...").start();
-
-        const server = new TunnelServer({
-            port: serverPort,
-            host: "0.0.0.0",
-            domain,
-            basePath,
-            tunnelPortRange: { min: 10000, max: 20000 },
-            selfSignedHttps: { enabled: true },
-        });
-
-        try {
-            await server.start();
-            spinner.succeed(`Server running on port ${serverPort}`);
-
-            // Connect tunnel
-            const tunnelSpinner = ora("Creating tunnel...").start();
-            await new Promise(resolve => setTimeout(resolve, 500));
-
-            const serverUrl = `wss://localhost:${serverPort}/_tunnel`;
-
-            await createTunnel({
-                protocol: options.https ? "https" : "http",
-                localHost: options.host,
-                localPort: parseInt(port),
-                subdomain,
-                serverUrl,
-                token: options.token,
-                insecure: true
-            });
-
-        } catch (error: any) {
-            spinner.fail(`Failed: ${error.message}`);
-            process.exit(1);
-        }
+        // No domain provided - show error
+        console.log(chalk.red("Error: -s, --domain <domain> is required"));
+        console.log(chalk.gray("\nExamples:"));
+        console.log(chalk.cyan("  opentunnel http 3000 -s example.com"));
+        console.log(chalk.cyan("  opentunnel http 3000 --domain example.com -n myapp"));
+        process.exit(1);
     });
 
 // TCP tunnel command
 program
     .command("tcp <port>")
     .description("Expose a local TCP server")
-    .option("-s, --server <domain>", "Remote server domain (if not provided, starts local server)")
+    .option("-s, --domain <domain>", "Remote server domain")
     .option("-b, --base-path <path>", "Server base path (default: op)")
     .option("-t, --token <token>", "Authentication token")
     .option("-r, --remote-port <port>", "Remote port to use")
+    .option("-n, --subdomain <name>", "Custom subdomain")
     .option("-h, --host <host>", "Local host", "localhost")
-    .option("--domain <domain>", "Domain for the tunnel", "localhost")
-    .option("--port <port>", "Server port", "443")
     .option("--insecure", "Skip SSL verification (for self-signed certs)")
     .option("--ngrok", "Use ngrok instead of OpenTunnel server")
     .option("--region <region>", "Ngrok region (us, eu, ap, au, sa, jp, in)", "us")
     .action(async (port: string, options) => {
-        if (options.ngrok || options.server === "ngrok") {
+        if (options.ngrok || options.domain === "ngrok") {
             await createNgrokTunnel({
                 protocol: "tcp",
                 localHost: options.host,
@@ -393,8 +491,8 @@ program
         }
 
         // If remote server domain provided, just connect to it
-        if (options.server) {
-            const { url: serverUrl } = buildServerUrl(options.server, options.basePath);
+        if (options.domain) {
+            const { url: serverUrl } = buildServerUrl(options.domain, options.basePath);
             await createTunnel({
                 protocol: "tcp",
                 localHost: options.host,
@@ -407,55 +505,12 @@ program
             return;
         }
 
-        // Start local server + tunnel (all-in-one)
-        const { TunnelServer } = await import("../server/TunnelServer");
-
-        const serverPort = parseInt(options.port);
-        const domain = options.domain;
-
-        console.log(chalk.cyan(`
- ██████╗ ██████╗ ███████╗███╗   ██╗████████╗██╗   ██╗███╗   ██╗███╗   ██╗███████╗██╗
-██╔═══██╗██╔══██╗██╔════╝████╗  ██║╚══██╔══╝██║   ██║████╗  ██║████╗  ██║██╔════╝██║
-██║   ██║██████╔╝█████╗  ██╔██╗ ██║   ██║   ██║   ██║██╔██╗ ██║██╔██╗ ██║█████╗  ██║
-██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║   ██║   ██║   ██║██║╚██╗██║██║╚██╗██║██╔══╝  ██║
-╚██████╔╝██║     ███████╗██║ ╚████║   ██║   ╚██████╔╝██║ ╚████║██║ ╚████║███████╗███████╗
- ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚══════╝
-`));
-
-        const spinner = ora("Starting server...").start();
-
-        const server = new TunnelServer({
-            port: serverPort,
-            host: "0.0.0.0",
-            domain,
-            basePath: "op",
-            tunnelPortRange: { min: 10000, max: 20000 },
-            selfSignedHttps: { enabled: true }
-        });
-
-        try {
-            await server.start();
-            spinner.succeed(`Server running on port ${serverPort}`);
-
-            const tunnelSpinner = ora("Creating TCP tunnel...").start();
-            await new Promise(resolve => setTimeout(resolve, 500));
-
-            const serverUrl = `wss://localhost:${serverPort}/_tunnel`;
-
-            await createTunnel({
-                protocol: "tcp",
-                localHost: options.host,
-                localPort: parseInt(port),
-                remotePort: options.remotePort ? parseInt(options.remotePort) : undefined,
-                serverUrl,
-                token: options.token,
-                insecure: true
-            });
-
-        } catch (error: any) {
-            spinner.fail(`Failed: ${error.message}`);
-            process.exit(1);
-        }
+        // No domain provided - show error
+        console.log(chalk.red("Error: -s, --domain <domain> is required"));
+        console.log(chalk.gray("\nExamples:"));
+        console.log(chalk.cyan("  opentunnel tcp 5432 -s example.com"));
+        console.log(chalk.cyan("  opentunnel tcp 5432 --domain example.com -r 15432"));
+        process.exit(1);
     });
 
 // Quick expose command
@@ -1077,6 +1132,7 @@ program
     .option("-f, --force", "Overwrite existing config file")
     .option("--server", "Create server mode config")
     .option("--client", "Create client mode config (default)")
+    .option("--hybrid", "Create hybrid mode config (server + tunnels in one terminal)")
     .action(async (options) => {
         const fsInit = await import("fs");
         const pathInit = await import("path");
@@ -1093,6 +1149,9 @@ program
         // Example config with environment variable syntax
         const clientConfig = `# OpenTunnel Client Configuration
 # Supports environment variables: \${VAR} or \${VAR:-default}
+
+name: my-tunnels                            # Instance name (shown in ps)
+# mode: client                              # Optional: auto-detected from config
 
 server:
   remote: \${SERVER_DOMAIN:-example.com}   # Server domain (system adds basePath)
@@ -1119,11 +1178,39 @@ tunnels:
         const serverConfig = `# OpenTunnel Server Configuration
 # Supports environment variables: \${VAR} or \${VAR:-default}
 
+name: my-server                             # Instance name (shown in ps)
+# mode: server                              # Optional: auto-detected from config
+
 server:
   domain: \${DOMAIN:-example.com}           # Your base domain
   token: \${AUTH_TOKEN}                     # From .env (optional for public server)
   # tcpPortMin: 10000                       # TCP tunnel port range (optional)
   # tcpPortMax: 20000
+`;
+
+        const hybridConfig = `# OpenTunnel Hybrid Configuration
+# Run server AND expose local ports in the same terminal
+# Supports environment variables: \${VAR} or \${VAR:-default}
+
+name: my-hybrid                            # Instance name (shown in ps)
+mode: hybrid                               # Server + tunnels in one terminal
+
+server:
+  domain: \${DOMAIN:-example.com}           # Your domain
+  token: \${AUTH_TOKEN}                     # From .env (optional)
+  # tcpPortMin: 10000                       # TCP tunnel port range (optional)
+  # tcpPortMax: 20000
+
+tunnels:
+  - name: web
+    protocol: http
+    port: 3000
+    subdomain: web                          # → web.op.example.com
+
+  - name: api
+    protocol: http
+    port: 4000
+    subdomain: api                          # → api.op.example.com
 `;
 
         const envExample = `# OpenTunnel Environment Variables
@@ -1137,7 +1224,7 @@ SERVER_DOMAIN=example.com
 AUTH_TOKEN=
 `;
 
-        const configContent = options.server ? serverConfig : clientConfig;
+        const configContent = options.hybrid ? hybridConfig : (options.server ? serverConfig : clientConfig);
         fsInit.writeFileSync(configPath, configContent);
 
         // Create .env.example if it doesn't exist
@@ -1158,14 +1245,148 @@ AUTH_TOKEN=
 
 // Up command - start tunnels from config
 program
-    .command("up")
+    .command("up [name]")
     .description("Start server and tunnels from opentunnel.yml")
     .option("-d, --detach", "Run in background (detached mode)")
     .option("-f, --file <path>", "Config file path", CONFIG_FILE)
     .option("--no-autostart", "Ignore autostart setting, start all tunnels")
-    .action(async (options) => {
+    .action(async (name: string | undefined, options) => {
         const fsModule = await import("fs");
         const pathModule = await import("path");
+
+        // Load config to get instance name
+        const cfgPath = pathModule.join(process.cwd(), options.file);
+        const configForName = loadConfig(cfgPath);
+
+        // Priority: CLI arg > config name > derived from filename
+        const instanceName = name ||
+            configForName?.name ||
+            pathModule.basename(options.file, ".yml").replace("opentunnel", "default");
+
+        // Detached mode - run in background
+        const shouldDetach = options.detach === true;
+
+        if (shouldDetach) {
+            const { spawn } = await import("child_process");
+
+            const pidFile = pathModule.join(process.cwd(), `.opentunnel-${instanceName}.pid`);
+            const logFile = pathModule.join(process.cwd(), `opentunnel-${instanceName}.log`);
+
+            // Check if already running
+            if (fsModule.existsSync(pidFile)) {
+                const oldPid = fsModule.readFileSync(pidFile, "utf-8").trim();
+                try {
+                    process.kill(parseInt(oldPid), 0);
+                    console.log(chalk.yellow(`Instance "${instanceName}" already running (PID: ${oldPid})`));
+                    console.log(chalk.gray(`Stop with: opentunnel down ${instanceName}`));
+                    return;
+                } catch {
+                    fsModule.unlinkSync(pidFile);
+                }
+            }
+
+            // Build args without -d flag
+            const args = ["up", instanceName];
+            if (options.file !== CONFIG_FILE) args.push("-f", options.file);
+            if (options.autostart === false) args.push("--no-autostart");
+
+            const out = fsModule.openSync(logFile, "a");
+            const err = fsModule.openSync(logFile, "a");
+
+            const child = spawn(process.execPath, [process.argv[1], ...args], {
+                detached: true,
+                stdio: ["ignore", out, err],
+                cwd: process.cwd(),
+            });
+
+            child.unref();
+            fsModule.writeFileSync(pidFile, String(child.pid));
+
+            // Wait and verify process is still running (check multiple times)
+            let isRunning = false;
+            for (let i = 0; i < 5; i++) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+                try {
+                    process.kill(child.pid!, 0);
+                    isRunning = true;
+                } catch {
+                    isRunning = false;
+                    break;
+                }
+            }
+
+            if (isRunning) {
+                // Register in global registry
+                registerInstance({
+                    name: instanceName,
+                    pid: child.pid!,
+                    configPath: cfgPath,
+                    logFile,
+                    pidFile,
+                    cwd: process.cwd(),
+                    startedAt: new Date().toISOString(),
+                });
+
+                console.log(chalk.green(`OpenTunnel "${instanceName}" started in background`));
+                console.log(chalk.gray(`  PID:      ${child.pid}`));
+                console.log(chalk.gray(`  Log:      ${logFile}`));
+                console.log(chalk.gray(`  CWD:      ${process.cwd()}`));
+                console.log("");
+                console.log(chalk.gray(`Stop with:  opentunnel down ${instanceName}`));
+                console.log(chalk.gray(`Stop all:   opentunnel down --all`));
+                console.log(chalk.gray(`List:       opentunnel ps`));
+                console.log(chalk.gray(`Logs:       opentunnel logs ${instanceName}`));
+            } else {
+                // Process died - show error from log
+                console.log(chalk.red(`\n✗ OpenTunnel "${instanceName}" failed to start\n`));
+
+                // Read log and find error
+                try {
+                    const logContent = fsModule.readFileSync(logFile, "utf-8");
+                    const lines = logContent.trim().split("\n");
+
+                    // Look for common errors
+                    const errorLine = lines.find(l =>
+                        l.includes("EADDRINUSE") ||
+                        l.includes("EACCES") ||
+                        l.includes("Error:") ||
+                        l.includes("error:")
+                    );
+
+                    if (errorLine) {
+                        if (errorLine.includes("EADDRINUSE")) {
+                            console.log(chalk.red("  Error: Port already in use"));
+                            console.log(chalk.gray("  Another process is using the port. Try:"));
+                            console.log(chalk.cyan("    - Stop other OpenTunnel: opentunnel down --all"));
+                            console.log(chalk.cyan("    - Use different port in config: server.port: 8443"));
+                        } else if (errorLine.includes("EACCES")) {
+                            console.log(chalk.red("  Error: Permission denied"));
+                            console.log(chalk.gray("  Port 443 requires admin/root. Try:"));
+                            console.log(chalk.cyan("    - Run as administrator"));
+                            console.log(chalk.cyan("    - Use port > 1024 in config"));
+                        } else {
+                            console.log(chalk.red(`  ${errorLine}`));
+                        }
+                    }
+
+                    // Show last few lines
+                    console.log(chalk.gray("\n  Last log lines:"));
+                    console.log(chalk.gray("  " + "─".repeat(56)));
+                    for (const line of lines.slice(-8)) {
+                        console.log(chalk.gray(`  ${line}`));
+                    }
+                    console.log(chalk.gray("  " + "─".repeat(56)));
+                } catch {
+                    console.log(chalk.gray(`Check log: cat ${logFile}`));
+                }
+
+                // Clean up pid file
+                try {
+                    fsModule.unlinkSync(pidFile);
+                } catch {}
+            }
+            return;
+        }
 
         // Load config file (with env variable substitution)
         const configPath = pathModule.join(process.cwd(), options.file);
@@ -1199,11 +1420,44 @@ program
         const useHttps = config.server?.https !== false;
         const hasTunnels = tunnelsToStart.length > 0;
 
+        // Parse multiple domains from config
+        let serverDomains: { domain: string; basePath: string }[] | undefined;
+        if (config.server?.domains && config.server.domains.length > 0) {
+            serverDomains = config.server.domains.map(d => {
+                if (typeof d === "string") {
+                    return { domain: d, basePath: basePath };
+                }
+                return { domain: d.domain, basePath: d.basePath || basePath };
+            });
+        }
+
         // Mode detection:
-        // - "remote" specified -> client mode (connect to remote server)
-        // - "domain" specified -> server mode (start local server + tunnels)
-        const isClientMode = !!remote && hasTunnels;
-        const isServerMode = !!domain;
+        // 1. Explicit mode in config takes priority
+        // 2. Auto-detect based on config:
+        //    - "remote" specified -> client mode (connect to remote server)
+        //    - "domain" specified -> server mode (start local server)
+        //    - "domain" + tunnels -> hybrid mode (server + tunnels in same terminal)
+        let mode: OpenTunnelMode;
+
+        if (config.mode) {
+            // Explicit mode
+            mode = config.mode;
+        } else {
+            // Auto-detect
+            if (remote && hasTunnels) {
+                mode = "client";
+            } else if (domain && hasTunnels) {
+                mode = "hybrid";
+            } else if (domain) {
+                mode = "server";
+            } else {
+                mode = "client"; // Default fallback
+            }
+        }
+
+        const isClientMode = mode === "client";
+        const isServerMode = mode === "server";
+        const isHybridMode = mode === "hybrid";
 
         if (!domain && !remote) {
             console.log(chalk.red("Missing configuration."));
@@ -1236,8 +1490,9 @@ program
                 console.log(chalk.red(`Failed to connect: ${error.message}`));
                 process.exit(1);
             }
-        } else if (isServerMode) {
-            // SERVER MODE: Start local server (always when domain is specified)
+        } else if (isServerMode || isHybridMode) {
+            // SERVER/HYBRID MODE: Start local server
+            // Hybrid mode also starts tunnels in the same terminal
             const { TunnelServer } = await import("../server/TunnelServer");
 
             const tcpMin = config.server?.tcpPortMin || 10000;
@@ -1248,8 +1503,9 @@ program
             const server = new TunnelServer({
                 port,
                 host: "0.0.0.0",
-                domain,
+                domain: domain || serverDomains?.[0]?.domain || "localhost",
                 basePath,
+                domains: serverDomains,  // Pass multiple domains if configured
                 tunnelPortRange: {
                     min: tcpMin,
                     max: tcpMax,
@@ -1259,10 +1515,20 @@ program
 
             try {
                 await server.start();
-                spinner.succeed(`Server running on https://${basePath}.${domain}:${port}`);
+                const primaryDomain = serverDomains?.[0]?.domain || domain;
+                const primaryBasePath = serverDomains?.[0]?.basePath || basePath;
+                spinner.succeed(`Server running on https://${primaryBasePath}.${primaryDomain}:${port}`);
 
-                // Start tunnels if defined
-                if (hasTunnels) {
+                // Show all domains if multiple configured
+                if (serverDomains && serverDomains.length > 1) {
+                    console.log(chalk.cyan("\nConfigured domains:"));
+                    for (const d of serverDomains) {
+                        console.log(chalk.white(`  *.${d.basePath}.${d.domain}`));
+                    }
+                }
+
+                // Start tunnels if in hybrid mode or if tunnels are defined
+                if (isHybridMode && hasTunnels) {
                     console.log(chalk.cyan(`\nStarting ${tunnelsToStart.length} tunnel(s)...\n`));
 
                     const wsProtocol = useHttps ? "wss" : "ws";
@@ -1272,8 +1538,8 @@ program
                     await new Promise(resolve => setTimeout(resolve, 500));
 
                     await startTunnelsFromConfig(tunnelsToStart, serverUrl, config.server?.token, true);
-                } else {
-                    console.log(chalk.gray("\nServer ready. No tunnels defined."));
+                } else if (isServerMode) {
+                    console.log(chalk.gray("\nServer ready. Waiting for connections..."));
                 }
 
                 console.log(chalk.gray("\nPress Ctrl+C to stop"));
@@ -1287,99 +1553,233 @@ program
         }
     });
 
-// Down command - stop all tunnels
+// Down command - stop tunnels (uses global registry)
 program
-    .command("down")
-    .description("Stop all running tunnels")
-    .action(async () => {
+    .command("down [name]")
+    .description("Stop running tunnels by name or all with --all")
+    .option("--all", "Stop ALL running instances globally")
+    .option("--local", "Only stop instances from current directory")
+    .action(async (name: string | undefined, options) => {
         const fs = await import("fs");
-        const path = await import("path");
 
-        // Find all tunnel PID files
-        const pidFiles = fs.readdirSync(process.cwd())
-            .filter(f => f.startsWith(".opentunnel-") && f.endsWith(".pid"));
+        const registry = loadRegistry();
+        let instancesToStop: InstanceInfo[] = [];
 
-        // Also include the server PID
-        const serverPidFile = ".opentunnel.pid";
-        if (fs.existsSync(path.join(process.cwd(), serverPidFile))) pidFiles.push(serverPidFile);
-        
-        if (pidFiles.length === 0) {
+        if (options.all) {
+            // Stop all instances globally
+            instancesToStop = registry.instances;
+        } else if (name) {
+            // Stop specific instance by name (search globally)
+            instancesToStop = registry.instances.filter(i => i.name === name);
+            if (instancesToStop.length === 0) {
+                console.log(chalk.yellow(`Instance "${name}" not found`));
+                console.log(chalk.gray(`Use 'opentunnel ps' to list running instances`));
+                return;
+            }
+        } else if (options.local) {
+            // Stop all instances from current directory
+            instancesToStop = registry.instances.filter(i => i.cwd === process.cwd());
+        } else {
+            // Default: stop instances from current directory
+            instancesToStop = registry.instances.filter(i => i.cwd === process.cwd());
+        }
+
+        if (instancesToStop.length === 0) {
             console.log(chalk.yellow("No tunnels running"));
+            console.log(chalk.gray("Use 'opentunnel ps' to list all instances"));
             return;
         }
 
-        console.log(chalk.cyan(`Stopping ${pidFiles.length} process(es)...\n`));
+        console.log(chalk.cyan(`Stopping ${instancesToStop.length} process(es)...\n`));
 
-        for (const pidFile of pidFiles) {
-            const pidPath = path.join(process.cwd(), pidFile);
-            const pid = parseInt(fs.readFileSync(pidPath, "utf-8").trim());
-            const name = pidFile.replace(".opentunnel-", "").replace(".pid", "").replace(".opentunnel", "server");
-
+        for (const instance of instancesToStop) {
             try {
-                process.kill(pid, "SIGTERM");
-                fs.unlinkSync(pidPath);
-                console.log(chalk.green(`  ✓ Stopped ${name} (PID: ${pid})`));
+                process.kill(instance.pid, "SIGTERM");
+                console.log(chalk.green(`  ✓ Stopped ${instance.name} (PID: ${instance.pid})`));
             } catch (err: any) {
                 if (err.code === "ESRCH") {
-                    fs.unlinkSync(pidPath);
-                    console.log(chalk.yellow(`  - ${name} was not running (cleaned up)`));
-                } else console.log(chalk.red(`  ✗ Failed to stop ${name}: ${err.message}`));
+                    console.log(chalk.yellow(`  - ${instance.name} was not running (cleaned up)`));
+                } else {
+                    console.log(chalk.red(`  ✗ Failed to stop ${instance.name}: ${err.message}`));
+                }
             }
+
+            // Remove PID file if exists
+            try {
+                if (fs.existsSync(instance.pidFile)) {
+                    fs.unlinkSync(instance.pidFile);
+                }
+            } catch {}
+
+            // Remove from registry
+            unregisterInstanceByPid(instance.pid);
         }
 
-        // Clean up log files
-        const logFiles = fs.readdirSync(process.cwd())
-            .filter(f => f.startsWith("opentunnel") && f.endsWith(".log"));
-
-        if (logFiles.length > 0) console.log(chalk.gray(`\nLog files preserved: ${logFiles.join(", ")}`));
-
-        console.log(chalk.green("\nAll tunnels stopped"));
+        const stoppedCount = instancesToStop.length;
+        if (options.all) {
+            console.log(chalk.green(`\nAll ${stoppedCount} instance(s) stopped`));
+        } else if (name) {
+            console.log(chalk.green(`\n"${name}" stopped`));
+        } else {
+            console.log(chalk.green(`\n${stoppedCount} instance(s) stopped`));
+        }
     });
 
-// PS command - list running tunnel processes
+// PS command - list running tunnel processes (global)
 program
     .command("ps")
-    .description("List running tunnel processes")
-    .action(async () => {
+    .description("List all running OpenTunnel processes (global)")
+    .option("--clean", "Remove entries for stopped processes")
+    .option("--local", "Only show processes from current directory")
+    .action(async (options) => {
         const fs = await import("fs");
-        const path = await import("path");
+        const pathMod = await import("path");
 
-        const pidFiles = fs.readdirSync(process.cwd()).filter(f => f.startsWith(".opentunnel") && f.endsWith(".pid"));
+        const registry = loadRegistry();
+        let instances = registry.instances;
 
-        if (pidFiles.length === 0) {
+        // Filter to local only if requested
+        if (options.local) {
+            instances = instances.filter(i => i.cwd === process.cwd());
+        }
+
+        if (instances.length === 0) {
             console.log(chalk.yellow("No tunnels running"));
             console.log(chalk.gray("Start tunnels with: opentunnel up -d"));
             return;
         }
 
-        console.log(chalk.cyan("\nRunning Processes:"));
-        console.log(chalk.gray("─".repeat(60)));
-        console.log(chalk.gray(`  ${"NAME".padEnd(20)} ${"PID".padEnd(10)} ${"STATUS".padEnd(10)}`));
-        console.log(chalk.gray("─".repeat(60)));
+        console.log(chalk.cyan("\nOpenTunnel Processes:"));
+        console.log(chalk.gray("─".repeat(90)));
+        console.log(chalk.gray(`  ${"NAME".padEnd(15)} ${"PID".padEnd(8)} ${"STATUS".padEnd(10)} ${"DIRECTORY"}`));
+        console.log(chalk.gray("─".repeat(90)));
 
-        for (const pidFile of pidFiles) {
-            const pidPath = path.join(process.cwd(), pidFile);
-            const pid = parseInt(fs.readFileSync(pidPath, "utf-8").trim());
-            let name = pidFile.replace(".opentunnel-", "").replace(".pid", "").replace(".opentunnel", "");
-            if (name === "") name = "server";
+        const stoppedInstances: InstanceInfo[] = [];
+        let hasRunning = false;
 
+        for (const instance of instances) {
             let status = "unknown";
             let statusColor = chalk.gray;
 
             try {
-                process.kill(pid, 0); // Check if process exists
+                process.kill(instance.pid, 0); // Check if process exists
                 status = "running";
                 statusColor = chalk.green;
+                hasRunning = true;
             } catch {
                 status = "stopped";
                 statusColor = chalk.red;
+                stoppedInstances.push(instance);
             }
 
-            console.log(`  ${chalk.white(name.padEnd(20))} ${chalk.gray(String(pid).padEnd(10))} ${statusColor(status)}`);
+            // Shorten the directory path for display
+            const shortCwd = instance.cwd.length > 40
+                ? "..." + instance.cwd.slice(-37)
+                : instance.cwd;
+
+            console.log(`  ${chalk.white(instance.name.padEnd(15))} ${chalk.gray(String(instance.pid).padEnd(8))} ${statusColor(status.padEnd(10))} ${chalk.gray(shortCwd)}`);
         }
 
-        console.log(chalk.gray("─".repeat(60)));
-        console.log(chalk.gray(`\nStop all: opentunnel down`));
+        console.log(chalk.gray("─".repeat(90)));
+
+        // Clean up stopped processes if requested
+        if (options.clean && stoppedInstances.length > 0) {
+            for (const instance of stoppedInstances) {
+                // Remove from registry
+                unregisterInstanceByPid(instance.pid);
+                // Remove PID file if exists
+                try {
+                    if (fs.existsSync(instance.pidFile)) {
+                        fs.unlinkSync(instance.pidFile);
+                    }
+                } catch {}
+            }
+            console.log(chalk.yellow(`\nCleaned up ${stoppedInstances.length} stopped process(es)`));
+        } else if (stoppedInstances.length > 0) {
+            console.log(chalk.gray(`\n${stoppedInstances.length} stopped. Run 'opentunnel ps --clean' to remove.`));
+        }
+
+        if (hasRunning) {
+            console.log(chalk.gray(`\nStop by name:  opentunnel down <name>`));
+            console.log(chalk.gray(`Stop all:      opentunnel down --all`));
+        }
+    });
+
+// Logs command - view logs for an instance
+program
+    .command("logs [name]")
+    .description("View logs for an instance")
+    .option("-f, --follow", "Follow log output (like tail -f)")
+    .option("-n, --lines <n>", "Number of lines to show", "50")
+    .action(async (name: string | undefined, options) => {
+        const fs = await import("fs");
+        const { spawn } = await import("child_process");
+
+        const registry = loadRegistry();
+
+        // Find instance
+        let instance: InstanceInfo | undefined;
+
+        if (name) {
+            instance = registry.instances.find(i => i.name === name);
+        } else {
+            // Use first instance from current directory
+            instance = registry.instances.find(i => i.cwd === process.cwd());
+        }
+
+        if (!instance) {
+            console.log(chalk.yellow(name ? `Instance "${name}" not found` : "No instance found in current directory"));
+            console.log(chalk.gray("Use 'opentunnel ps' to list instances"));
+            return;
+        }
+
+        if (!fs.existsSync(instance.logFile)) {
+            console.log(chalk.yellow(`Log file not found: ${instance.logFile}`));
+            return;
+        }
+
+        if (options.follow) {
+            // Use tail -f equivalent
+            console.log(chalk.gray(`Following logs for ${instance.name}... (Ctrl+C to stop)\n`));
+
+            // Read existing content first
+            const content = fs.readFileSync(instance.logFile, "utf-8");
+            const lines = content.split("\n").slice(-parseInt(options.lines));
+            console.log(lines.join("\n"));
+
+            // Watch for changes
+            let lastSize = fs.statSync(instance.logFile).size;
+            const watcher = setInterval(() => {
+                try {
+                    const stat = fs.statSync(instance!.logFile);
+                    if (stat.size > lastSize) {
+                        const fd = fs.openSync(instance!.logFile, "r");
+                        const buffer = Buffer.alloc(stat.size - lastSize);
+                        fs.readSync(fd, buffer, 0, buffer.length, lastSize);
+                        fs.closeSync(fd);
+                        process.stdout.write(buffer.toString());
+                        lastSize = stat.size;
+                    }
+                } catch {
+                    clearInterval(watcher);
+                }
+            }, 100);
+
+            // Handle Ctrl+C
+            process.on("SIGINT", () => {
+                clearInterval(watcher);
+                process.exit(0);
+            });
+
+            // Keep running
+            await new Promise(() => {});
+        } else {
+            // Just show last N lines
+            const content = fs.readFileSync(instance.logFile, "utf-8");
+            const lines = content.split("\n").slice(-parseInt(options.lines));
+            console.log(chalk.gray(`Last ${options.lines} lines of ${instance.name}:\n`));
+            console.log(lines.join("\n"));
+        }
     });
 
 // Test server command - simple HTTP server for testing tunnels

@@ -85,6 +85,45 @@ export function extractSubdomain(host: string, baseDomain: string, basePath: str
     return hostLower.slice(0, -(baseLower.length + 1));
 };
 
+// Multi-domain version: tries to match against multiple domains
+export interface DomainMatch {
+    subdomain: string;
+    domain: string;
+    basePath: string;
+}
+
+export function extractSubdomainMulti(
+    host: string,
+    domains: { domain: string; basePath: string }[]
+): DomainMatch | null {
+    const hostLower = host.toLowerCase();
+
+    for (const { domain, basePath } of domains) {
+        const baseLower = domain.toLowerCase();
+        const fullBase = `${basePath}.${baseLower}`;
+
+        // Check for pattern: subdomain.basePath.domain.com
+        if (hostLower.endsWith(`.${fullBase}`)) {
+            return {
+                subdomain: hostLower.slice(0, -(fullBase.length + 1)),
+                domain,
+                basePath,
+            };
+        }
+
+        // Check for pattern: subdomain.domain.com (direct, no basePath)
+        if (basePath === "" && hostLower.endsWith(`.${baseLower}`) && hostLower !== baseLower) {
+            return {
+                subdomain: hostLower.slice(0, -(baseLower.length + 1)),
+                domain,
+                basePath,
+            };
+        }
+    }
+
+    return null;
+};
+
 export function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 };
