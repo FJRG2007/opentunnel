@@ -111,7 +111,8 @@ program
 
 // Helper function to build WebSocket URL from domain
 // User only provides base domain (e.g., fjrg2007.com), system handles the rest
-function buildServerUrl(server: string, insecure: boolean, basePath?: string): { url: string; displayName: string } {
+// Note: --insecure flag only affects certificate verification, not the protocol
+function buildServerUrl(server: string, basePath?: string): { url: string; displayName: string } {
     let hostname = server;
 
     // Remove protocol if provided
@@ -127,9 +128,9 @@ function buildServerUrl(server: string, insecure: boolean, basePath?: string): {
     const effectiveBasePath = basePath || "op";
     const fullHostname = effectiveBasePath ? `${effectiveBasePath}.${hostname}` : hostname;
 
-    const protocol = insecure ? "ws" : "wss";
+    // Always use wss:// for remote servers (--insecure only skips cert verification)
     return {
-        url: `${protocol}://${fullHostname}/_tunnel`,
+        url: `wss://${fullHostname}/_tunnel`,
         displayName: hostname,
     };
 }
@@ -147,7 +148,7 @@ program
     .option("--insecure", "Skip SSL certificate verification (for self-signed certs)")
     .action(async (port: string, options) => {
         // Build server URL from domain (user provides domain, system adds basePath)
-        const { url: serverUrl, displayName: serverDisplayName } = buildServerUrl(options.server, options.insecure, options.basePath);
+        const { url: serverUrl, displayName: serverDisplayName } = buildServerUrl(options.server, options.basePath);
 
         console.log(chalk.cyan(`
  ██████╗ ██████╗ ███████╗███╗   ██╗████████╗██╗   ██╗███╗   ██╗███╗   ██╗███████╗██╗
@@ -161,13 +162,22 @@ program
 
         const spinner = ora("Connecting to server...").start();
 
-        try {
+        // Helper to check if error is SSL-related
+        const isSslError = (err: any) =>
+            err.message?.includes("SELF_SIGNED_CERT") ||
+            err.message?.includes("CERT_") ||
+            err.message?.includes("certificate") ||
+            err.code === "DEPTH_ZERO_SELF_SIGNED_CERT" ||
+            err.code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE";
+
+        // Helper to connect and create tunnel
+        const connectAndCreateTunnel = async (insecure: boolean) => {
             const client = new TunnelClient({
                 serverUrl,
                 token: options.token,
                 reconnect: true,
                 silent: true,
-                rejectUnauthorized: !options.insecure,
+                rejectUnauthorized: !insecure,
             });
 
             await client.connect();
@@ -180,12 +190,44 @@ program
                 subdomain: options.subdomain,
             });
 
+            return { client, tunnelId, publicUrl };
+        };
+
+        try {
+            let client: TunnelClient;
+            let tunnelId: string;
+            let publicUrl: string;
+            let usedInsecure = options.insecure || false;
+
+            try {
+                // First attempt with user's preference
+                const result = await connectAndCreateTunnel(options.insecure || false);
+                client = result.client;
+                tunnelId = result.tunnelId;
+                publicUrl = result.publicUrl;
+            } catch (firstErr: any) {
+                // If SSL error and not already using insecure, retry with insecure
+                if (isSslError(firstErr) && !options.insecure) {
+                    spinner.text = "Retrying with insecure mode...";
+                    const result = await connectAndCreateTunnel(true);
+                    client = result.client;
+                    tunnelId = result.tunnelId;
+                    publicUrl = result.publicUrl;
+                    usedInsecure = true;
+                } else {
+                    throw firstErr;
+                }
+            }
+
             spinner.succeed("Tunnel established!");
 
             console.log("");
             console.log(chalk.cyan(`  OpenTunnel ${chalk.gray(`(via ${serverDisplayName})`)}`));
             console.log(chalk.gray("  ─────────────────────────────────────────"));
             console.log(`  ${chalk.white("Status:")}    ${chalk.green("● Online")}`);
+            if (usedInsecure && !options.insecure) {
+                console.log(`  ${chalk.white("Security:")} ${chalk.yellow("⚠ Insecure (self-signed cert)")}`);
+            }
             console.log(`  ${chalk.white("Protocol:")}  ${chalk.yellow(options.protocol.toUpperCase())}`);
             console.log(`  ${chalk.white("Local:")}     ${chalk.gray(`${options.host}:${port}`)}`);
             console.log(`  ${chalk.white("Public:")}    ${chalk.green(publicUrl)}`);
@@ -229,8 +271,8 @@ program
             console.log("");
             console.log(chalk.yellow("  Troubleshooting:"));
             console.log(chalk.gray("  - Check your internet connection"));
-            console.log(chalk.gray("  - The public server may be temporarily unavailable"));
-            console.log(chalk.gray("  - Try hosting your own server: opentunnel server --domain yourdomain.com"));
+            console.log(chalk.gray("  - Verify the server domain is correct"));
+            console.log(chalk.gray("  - Make sure the server is running"));
             console.log("");
             process.exit(1);
         }
@@ -267,7 +309,7 @@ program
 
         // If remote server domain provided, just connect to it
         if (options.server) {
-            const { url: serverUrl } = buildServerUrl(options.server, options.insecure, options.basePath);
+            const { url: serverUrl } = buildServerUrl(options.server, options.basePath);
             await createTunnel({
                 protocol: options.https ? "https" : "http",
                 localHost: options.host,
@@ -363,7 +405,7 @@ program
 
         // If remote server domain provided, just connect to it
         if (options.server) {
-            const { url: serverUrl } = buildServerUrl(options.server, options.insecure, options.basePath);
+            const { url: serverUrl } = buildServerUrl(options.server, options.basePath);
             await createTunnel({
                 protocol: "tcp",
                 localHost: options.host,
@@ -1178,7 +1220,7 @@ program
         if (isClientMode) {
             // CLIENT MODE: Connect to remote server
             // Build URL using basePath (default: op) -> wss://op.example.com/_tunnel
-            const { url: serverUrl } = buildServerUrl(remote!, !useHttps, basePath);
+            const { url: serverUrl } = buildServerUrl(remote!, basePath);
 
             console.log(chalk.cyan(`Connecting to ${remote}...\n`));
             console.log(chalk.cyan(`Starting ${tunnelsToStart.length} tunnel(s)...\n`));
