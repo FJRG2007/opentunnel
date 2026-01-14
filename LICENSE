@@ -1,21 +1,54 @@
-MIT License
+FJRG2007 Proprietary License
 
-Copyright (c) 2024 FJRG2007
+Copyright (c) 2024 FJRG2007. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+TERMS AND CONDITIONS
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. DEFINITIONS
+   "Software" refers to the source code, documentation, and any associated files
+   in this repository.
+   "Author" refers to FJRG2007, the copyright holder.
+   "User" refers to any individual or entity using the Software.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+2. PERMITTED USE
+   Users are granted a non-exclusive, non-transferable license to:
+   - Use the Software for personal, educational, or internal business purposes.
+   - Study and learn from the source code.
+   - Run the Software in any environment.
+
+3. PROHIBITED ACTIONS
+   Without explicit written consent from the Author, Users MAY NOT:
+   - Fork, copy, or create derivative works of the Software.
+   - Redistribute the Software in any form, whether modified or unmodified.
+   - Sublicense, sell, rent, lease, or otherwise transfer rights to the Software.
+   - Use the Software for commercial purposes or monetary gain.
+   - Monetize any product, service, or content that incorporates the Software.
+   - Include the Software in any product or service offered for sale.
+
+4. COMMERCIAL USE
+   Any commercial use, monetization, or revenue generation involving this
+   Software requires explicit written permission from the Author. To request
+   commercial licensing, contact the Author directly.
+
+5. ATTRIBUTION
+   If referencing this Software in publications, presentations, or other media,
+   appropriate credit must be given to the Author.
+
+6. NO WARRANTY
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+   ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+   WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+7. TERMINATION
+   This license is automatically terminated if the User violates any of these
+   terms. Upon termination, the User must cease all use of the Software and
+   destroy any copies in their possession.
+
+8. GOVERNING LAW
+   This license shall be governed by and construed in accordance with applicable
+   copyright laws.
+
+For permissions beyond the scope of this license, contact: FJRG2007

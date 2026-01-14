@@ -1,0 +1,46 @@
+# Dependencies
+node_modules
+
+# Build artifacts
+dist
+
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs
+
+# Environment files (use docker-compose env instead)
+.env
+.env.local
+.env.*.local
+
+# Certificates (will be generated)
+.certs
+
+# PID files
+*.pid
+.opentunnel*.pid
+
+# Test files
+coverage
+.nyc_output
+
+# Documentation
+*.md
+!README.md
+
+# Misc
+tmpclaude-*

@@ -1,6 +1,6 @@
 {
     "name": "opentunnel-cli",
-    "version": "1.0.4",
+    "version": "1.0.5",
     "description": "Self-hosted tunnel solution to expose local ports to the internet via custom domains",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
@@ -33,7 +33,7 @@
         "self-hosted"
     ],
     "author": "FJRG2007",
-    "license": "MIT",
+    "license": "SEE LICENSE IN LICENSE",
     "homepage": "https://github.com/FJRG2007/opentunnel#readme",
     "repository": {
         "type": "git",

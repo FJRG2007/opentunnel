@@ -1,0 +1,75 @@
+version: "3.8"
+
+services:
+  opentunnel:
+    build: .
+    image: opentunnel:latest
+    container_name: opentunnel-server
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "80:80"
+      - "10000-20000:10000-20000"
+    environment:
+      - NODE_ENV=production
+      - PORT=443
+      - HOST=0.0.0.0
+      - DOMAIN=${DOMAIN:-localhost}
+      - BASE_PATH=${BASE_PATH:-op}
+      - TCP_PORT_MIN=10000
+      - TCP_PORT_MAX=20000
+      # Authentication (optional)
+      - AUTH_TOKENS=${AUTH_TOKENS:-}
+      # Let's Encrypt (optional)
+      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL:-}
+      - LETSENCRYPT_PRODUCTION=${LETSENCRYPT_PRODUCTION:-false}
+      # Cloudflare DNS (optional)
+      - CLOUDFLARE_TOKEN=${CLOUDFLARE_TOKEN:-}
+    volumes:
+      # Persist certificates
+      - opentunnel-certs:/app/.certs
+      # Persist logs
+      - opentunnel-logs:/app/logs
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:443/api/stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Run with elevated permissions for port 443
+    # Remove if using reverse proxy on higher ports
+    cap_add:
+      - NET_BIND_SERVICE
+    networks:
+      - opentunnel-network
+
+  # Optional: Nginx reverse proxy (uncomment if needed)
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: opentunnel-nginx
+  #   restart: unless-stopped
+  #   ports:
+  #     - "443:443"
+  #     - "80:80"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - opentunnel-certs:/etc/nginx/certs:ro
+  #   depends_on:
+  #     - opentunnel
+  #   networks:
+  #     - opentunnel-network
+
+volumes:
+  opentunnel-certs:
+    driver: local
+  opentunnel-logs:
+    driver: local
+
+networks:
+  opentunnel-network:
+    driver: bridge

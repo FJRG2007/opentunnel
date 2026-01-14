@@ -1,0 +1,52 @@
+[Unit]
+Description=OpenTunnel Server - Self-hosted tunnel solution
+Documentation=https://github.com/FJRG2007/opentunnel
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opentunnel
+Group=opentunnel
+WorkingDirectory=/opt/opentunnel
+
+# Environment file (create this file with your configuration)
+EnvironmentFile=/opt/opentunnel/.env
+
+# Main command
+ExecStart=/usr/bin/node /opt/opentunnel/dist/cli/index.js server \
+    --port ${PORT:-443} \
+    --host ${HOST:-0.0.0.0} \
+    --domain ${DOMAIN} \
+    --base-path ${BASE_PATH:-op} \
+    --tcp-min ${TCP_PORT_MIN:-10000} \
+    --tcp-max ${TCP_PORT_MAX:-20000}
+
+# Restart configuration
+Restart=always
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/opentunnel/.certs /opt/opentunnel/logs
+
+# Allow binding to privileged ports (80, 443)
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=opentunnel
+
+[Install]
+WantedBy=multi-user.target

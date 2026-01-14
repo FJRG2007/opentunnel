@@ -10,6 +10,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import * as fs from "fs";
 import * as path from "path";
 
+
 // Config file interfaces
 interface TunnelConfigYaml {
     name: string;
@@ -44,6 +45,115 @@ program
     .alias("ot")
     .description("Expose local ports to the internet via custom domains or ngrok")
     .version("1.0.0");
+
+// Quick command - quick tunnel to any server
+program
+    .command("quick <port>")
+    .description("Instantly expose a local port to the internet")
+    .requiredOption("-s, --server <url>", "Server URL (e.g., wss://op.example.com/_tunnel)")
+    .option("-n, --subdomain <name>", "Request a specific subdomain (e.g., 'myapp')")
+    .option("-p, --protocol <proto>", "Protocol (http, https, tcp)", "http")
+    .option("-h, --host <host>", "Local host to forward to", "localhost")
+    .option("-t, --token <token>", "Authentication token (if server requires it)")
+    .option("--insecure", "Skip SSL certificate verification (for self-signed certs)")
+    .action(async (port: string, options) => {
+        // Determine server display name
+        const serverUrl = options.server;
+        let serverDisplayName = serverUrl;
+
+        try {
+            const url = new URL(serverUrl.replace("wss://", "https://").replace("ws://", "http://"));
+            serverDisplayName = url.hostname;
+        } catch {
+            // Keep original if parsing fails
+        }
+
+        console.log(chalk.cyan(`
+ ██████╗ ██████╗ ███████╗███╗   ██╗████████╗██╗   ██╗███╗   ██╗███╗   ██╗███████╗██╗
+██╔═══██╗██╔══██╗██╔════╝████╗  ██║╚══██╔══╝██║   ██║████╗  ██║████╗  ██║██╔════╝██║
+██║   ██║██████╔╝█████╗  ██╔██╗ ██║   ██║   ██║   ██║██╔██╗ ██║██╔██╗ ██║█████╗  ██║
+██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║   ██║   ██║   ██║██║╚██╗██║██║╚██╗██║██╔══╝  ██║
+╚██████╔╝██║     ███████╗██║ ╚████║   ██║   ╚██████╔╝██║ ╚████║██║ ╚████║███████╗███████╗
+ ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚══════╝
+`));
+        console.log(chalk.gray(`  Connecting to ${serverDisplayName}...\n`));
+
+        const spinner = ora("Connecting to server...").start();
+
+        try {
+            const client = new TunnelClient({
+                serverUrl,
+                token: options.token,
+                reconnect: true,
+                silent: true,
+                rejectUnauthorized: !options.insecure,
+            });
+
+            await client.connect();
+            spinner.text = "Creating tunnel...";
+
+            const { tunnelId, publicUrl } = await client.createTunnel({
+                protocol: options.protocol as TunnelProtocol,
+                localHost: options.host,
+                localPort: parseInt(port),
+                subdomain: options.subdomain,
+            });
+
+            spinner.succeed("Tunnel established!");
+
+            console.log("");
+            console.log(chalk.cyan(`  OpenTunnel ${chalk.gray(`(via ${serverDisplayName})`)}`));
+            console.log(chalk.gray("  ─────────────────────────────────────────"));
+            console.log(`  ${chalk.white("Status:")}    ${chalk.green("● Online")}`);
+            console.log(`  ${chalk.white("Protocol:")}  ${chalk.yellow(options.protocol.toUpperCase())}`);
+            console.log(`  ${chalk.white("Local:")}     ${chalk.gray(`${options.host}:${port}`)}`);
+            console.log(`  ${chalk.white("Public:")}    ${chalk.green(publicUrl)}`);
+            console.log(chalk.gray("  ─────────────────────────────────────────"));
+            console.log("");
+            console.log(chalk.gray("  Press Ctrl+C to close the tunnel"));
+            console.log("");
+
+            // Keep alive with uptime counter
+            const startTime = Date.now();
+            const statsInterval = setInterval(() => {
+                const uptime = formatDuration(Date.now() - startTime);
+                process.stdout.write(`\r  ${chalk.gray(`Uptime: ${uptime}`)}`);
+            }, 1000);
+
+            // Handle exit
+            const cleanup = async () => {
+                clearInterval(statsInterval);
+                console.log("\n");
+                const closeSpinner = ora("Closing tunnel...").start();
+                await client.closeTunnel(tunnelId);
+                await client.disconnect();
+                closeSpinner.succeed("Tunnel closed");
+                process.exit(0);
+            };
+
+            process.on("SIGINT", cleanup);
+            process.on("SIGTERM", cleanup);
+
+            // Handle reconnection
+            client.on("disconnected", () => {
+                console.log(chalk.yellow("\n  Disconnected, reconnecting..."));
+            });
+
+            client.on("connected", () => {
+                console.log(chalk.green("  Reconnected!"));
+            });
+
+        } catch (err: any) {
+            spinner.fail(`Failed: ${err.message}`);
+            console.log("");
+            console.log(chalk.yellow("  Troubleshooting:"));
+            console.log(chalk.gray("  - Check your internet connection"));
+            console.log(chalk.gray("  - The public server may be temporarily unavailable"));
+            console.log(chalk.gray("  - Try hosting your own server: opentunnel server --domain yourdomain.com"));
+            console.log("");
+            process.exit(1);
+        }
+    });
 
 // HTTP tunnel command
 program
