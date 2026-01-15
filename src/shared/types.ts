@@ -142,6 +142,7 @@ export interface IpAccessConfig {
 export interface DomainConfig {
     domain: string;
     basePath: string;
+    wildcard?: boolean;  // Default: true. Set to false for domains without wildcard support (e.g., DuckDNS)
 }
 
 // Server configuration

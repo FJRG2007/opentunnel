@@ -1,7 +1,6 @@
-name: demo-server
-
 server:
-  domain: ${DOMAIN:-fjrg2007.com}
-  token: ${AUTH_TOKEN}                      # From .env (optional for public server)
-  # tcpPortMin: 10000                       # TCP tunnel port range (optional)
-  # tcpPortMax: 20000
+  domains:
+    - domain: fjrg2007.com
+      basePath: op              # Tunnels at: *.op.fjrg2007.com
+    - domain: testopentunnel.duckdns.org
+  port: 443

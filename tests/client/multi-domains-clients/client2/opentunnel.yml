@@ -1,0 +1,11 @@
+name: multi-domains-client-2
+server:
+  remote: ${DOMAIN:-testopentunnel.duckdns.org}
+  token: ${AUTH_TOKEN}                    # From .env (required for private servers)
+
+tunnels:
+  - name: backend
+    protocol: http
+    port: 4000
+    subdomain: api                        # → api.op.testopentunnel.duckdns.org
+    autostart: true

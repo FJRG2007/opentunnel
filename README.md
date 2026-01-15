@@ -355,11 +355,7 @@ opentunnel server -d --domain yourdomain.com -p 8443 --public-port 8443
 
 # 🌐 Multi-Domain Support
 
-OpenTunnel can handle **multiple domains** on a single server instance. This is useful when you want to:
-
-- Serve tunnels under different domain names
-- Use different base paths for different domains
-- Consolidate multiple domains on one server
+OpenTunnel can handle **multiple domains** on a single server instance. Each domain works independently - clients connect to whichever domain they prefer and create their own tunnels.
 
 ## DNS Configuration
 
@@ -372,48 +368,99 @@ For each domain you want to use, create DNS records pointing to your server:
 | `domain2.com` | A | `op` | `YOUR_SERVER_IP` |
 | `domain2.com` | A | `*.op` | `YOUR_SERVER_IP` |
 
-## Configuration
+## Server Configuration
 
-Configure multiple domains in `opentunnel.yml`:
+Configure the server with multiple domains in `opentunnel.yml`:
 
 ```yaml
 server:
   domains:
     - domain: domain1.com
-      basePath: op              # Tunnels at: *.op.domain1.com
+      basePath: op              # Accepts tunnels at: *.op.domain1.com
     - domain: domain2.com
-      basePath: op              # Tunnels at: *.op.domain2.com
+      basePath: op              # Accepts tunnels at: *.op.domain2.com
   port: 443
-
-tunnels:
-  - name: app
-    protocol: http
-    port: 3000
-    subdomain: myapp            # Accessible on ALL configured domains
 ```
 
-With this configuration, the tunnel `myapp` is accessible at:
-- `https://myapp.op.domain1.com`
-- `https://myapp.op.domain2.com`
+Start the server:
+```bash
+opentunnel up -d
+```
+
+## How Clients Connect
+
+Clients connect to whichever domain they want. Each client creates their own tunnels independently:
+
+**Client A** (connects to domain1.com):
+```bash
+opentunnel quick 3000 -s domain1.com -n myapp
+# → https://myapp.op.domain1.com
+```
+
+**Client B** (connects to domain2.com):
+```bash
+opentunnel quick 8080 -s domain2.com -n api
+# → https://api.op.domain2.com
+```
+
+**Client C** (also connects to domain1.com):
+```bash
+opentunnel quick 5000 -s domain1.com -n backend
+# → https://backend.op.domain1.com
+```
+
+Each tunnel only exists on the domain the client connected to.
 
 ## Single Domain (Backward Compatible)
 
-If you only need one domain, use the simple configuration:
+If you only need one domain:
 
 ```yaml
 server:
-  domain: example.com           # Single domain
-  basePath: op                  # Default: op
+  domain: example.com
+  basePath: op
 ```
 
-This is equivalent to:
+## Domains Without Wildcard Support (DuckDNS)
+
+Some DNS providers like **DuckDNS** don't support wildcard subdomains (`*.domain`). OpenTunnel automatically detects DuckDNS domains and uses **port-based routing** instead of subdomains.
+
+**Auto-detection:** Domains ending in `.duckdns.org` automatically use port-based mode.
+
+**Important:** DuckDNS domains cannot use `basePath` - it will throw an error:
+
+```yaml
+# ❌ WRONG - Will throw an error
+server:
+  domains:
+    - domain: myapp.duckdns.org
+      basePath: op              # Error! DuckDNS doesn't support subdomains
+
+# ✅ CORRECT
+server:
+  domains:
+    - domain: fjrg2007.com
+      basePath: op              # Subdomain-based: *.op.fjrg2007.com
+    - domain: myapp.duckdns.org
+                                # Port-based: myapp.duckdns.org:<port>
+```
+
+**Manual configuration:** Use `wildcard: false` for other domains without wildcard support:
 
 ```yaml
 server:
   domains:
-    - domain: example.com
-      basePath: op
+    - domain: fjrg2007.com
+      basePath: op              # Subdomain-based: *.op.fjrg2007.com
+    - domain: other-no-wildcard.com
+      wildcard: false           # Manual: port-based
 ```
+
+**How it works:**
+- **Wildcard domains:** `https://myapp.op.fjrg2007.com`
+- **Non-wildcard domains:** `https://myapp.duckdns.org:10001`
+
+Clients connecting to non-wildcard domains receive port-based URLs automatically.
 
 ## SSL Certificates
 
@@ -429,9 +476,9 @@ For Let's Encrypt, you'll need separate certificates or a multi-domain certifica
 server:
   domains:
     - domain: dev.company.com
-      basePath: op              # Dev team: *.op.dev.company.com
+      basePath: op              # Dev team connects here
     - domain: staging.company.com
-      basePath: op              # Staging: *.op.staging.company.com
+      basePath: op              # QA team connects here
 ```
 
 ### White-Label Service
@@ -440,9 +487,9 @@ server:
 server:
   domains:
     - domain: client1.com
-      basePath: op              # Client 1: *.op.client1.com
+      basePath: op              # Client 1's tunnels
     - domain: client2.com
-      basePath: op              # Client 2: *.op.client2.com
+      basePath: op              # Client 2's tunnels
 ```
 
 ### Migration Between Domains
@@ -451,7 +498,7 @@ server:
 server:
   domains:
     - domain: newdomain.com
-      basePath: op              # New domain (primary)
+      basePath: op              # New domain
     - domain: olddomain.com
       basePath: op              # Old domain (still supported)
 ```
@@ -684,6 +731,7 @@ opentunnel ps         # Show running processes
 | `opentunnel server -d` | Start tunnel server in background |
 | `opentunnel up` | Start from opentunnel.yml |
 | `opentunnel down` | Stop all tunnels |
+| `opentunnel restart` | Restart tunnels (down + up) |
 | `opentunnel stop` | Stop server |
 | `opentunnel ps` | List running processes |
 | `opentunnel init` | Create config file |
@@ -737,6 +785,10 @@ opentunnel up staging -d            # Named instance "staging"
 
 # List running instances
 opentunnel ps
+
+# Restart instances
+opentunnel restart                  # Restart all in current directory
+opentunnel restart production       # Restart specific instance
 
 # Stop instances
 opentunnel down production          # Stop specific instance

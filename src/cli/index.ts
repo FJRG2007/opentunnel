@@ -32,6 +32,7 @@ type OpenTunnelMode = "server" | "client" | "hybrid";
 interface DomainConfig {
     domain: string;
     basePath?: string;  // Default: "op"
+    wildcard?: boolean; // Default: true (auto-detected false for DuckDNS domains)
 }
 
 interface OpenTunnelConfig {
@@ -73,6 +74,33 @@ function getRegistryPath(): string {
     const path = require("path");
     const registryDir = path.join(os.homedir(), ".opentunnel");
     return path.join(registryDir, "registry.json");
+}
+
+function getLogsDir(): string {
+    const os = require("os");
+    const path = require("path");
+    const fs = require("fs");
+    const logsDir = path.join(os.homedir(), ".opentunnel", "logs");
+
+    // Ensure directory exists
+    if (!fs.existsSync(logsDir)) {
+        fs.mkdirSync(logsDir, { recursive: true });
+    }
+
+    return logsDir;
+}
+
+function getLogFilePath(instanceName: string): string {
+    const path = require("path");
+    // Sanitize instance name for filename
+    const safeName = instanceName.replace(/[^a-zA-Z0-9_-]/g, "_");
+    return path.join(getLogsDir(), `${safeName}.log`);
+}
+
+function getPidFilePath(instanceName: string): string {
+    const path = require("path");
+    const safeName = instanceName.replace(/[^a-zA-Z0-9_-]/g, "_");
+    return path.join(getLogsDir(), `${safeName}.pid`);
 }
 
 function loadRegistry(): GlobalRegistry {
@@ -195,7 +223,7 @@ program
     .name("opentunnel")
     .alias("ot")
     .description("Expose local ports to the internet via custom domains or ngrok")
-    .version("1.0.17");
+    .version("1.0.20");
 
 // Helper function to build WebSocket URL from domain
 // User only provides base domain (e.g., fjrg2007.com), system handles the rest
@@ -620,8 +648,8 @@ program
             const fsAsync = await import("fs");
             const pathAsync = await import("path");
 
-            const pidFile = pathAsync.join(process.cwd(), ".opentunnel.pid");
-            const logFile = pathAsync.join(process.cwd(), "opentunnel.log");
+            const pidFile = getPidFilePath("server");
+            const logFile = getLogFilePath("server");
 
             // Check if already running
             if (fsAsync.existsSync(pidFile)) {
@@ -800,7 +828,7 @@ program
         const fs = await import("fs");
         const path = await import("path");
 
-        const pidFile = path.join(process.cwd(), ".opentunnel.pid");
+        const pidFile = getPidFilePath("server");
 
         if (!fs.existsSync(pidFile)) {
             console.log(chalk.yellow("No server running (PID file not found)"));
@@ -818,44 +846,6 @@ program
                 fs.unlinkSync(pidFile);
                 console.log(chalk.yellow(`Server was not running (stale PID file removed)`));
             } else console.log(chalk.red(`Failed to stop server: ${err.message}`));
-        }
-    });
-
-// Logs command
-program
-    .command("logs")
-    .description("Show server logs")
-    .option("-f, --follow", "Follow log output")
-    .option("-n, --lines <n>", "Number of lines to show", "50")
-    .action(async (options) => {
-        const fs = await import("fs");
-        const path = await import("path");
-        const { spawn } = await import("child_process");
-
-        const logFile = path.join(process.cwd(), "opentunnel.log");
-
-        if (!fs.existsSync(logFile)) {
-            console.log(chalk.yellow("No log file found"));
-            return;
-        }
-
-        if (options.follow) {
-            // Use tail -f on Unix or PowerShell on Windows
-            const isWindows = process.platform === "win32";
-            if (isWindows) {
-                const child = spawn("powershell", ["-Command", `Get-Content -Path "${logFile}" -Tail ${options.lines} -Wait`], {
-                    stdio: "inherit"
-                });
-                child.on("error", () => {
-                    // Fallback: just read the file
-                    console.log(fs.readFileSync(logFile, "utf-8"));
-                });
-            } else spawn("tail", ["-f", "-n", options.lines, logFile], { stdio: "inherit" });
-        } else {
-            const content = fs.readFileSync(logFile, "utf-8");
-            const lines = content.split("\n");
-            const lastLines = lines.slice(-parseInt(options.lines));
-            console.log(lastLines.join("\n"));
         }
     });
 
@@ -1269,8 +1259,8 @@ program
         if (shouldDetach) {
             const { spawn } = await import("child_process");
 
-            const pidFile = pathModule.join(process.cwd(), `.opentunnel-${instanceName}.pid`);
-            const logFile = pathModule.join(process.cwd(), `opentunnel-${instanceName}.log`);
+            const pidFile = getPidFilePath(instanceName);
+            const logFile = getLogFilePath(instanceName);
 
             // Check if already running
             if (fsModule.existsSync(pidFile)) {
@@ -1421,22 +1411,38 @@ program
         const hasTunnels = tunnelsToStart.length > 0;
 
         // Parse multiple domains from config
-        let serverDomains: { domain: string; basePath: string }[] | undefined;
+        // Helper to check if domain is DuckDNS
+        const isDuckDns = (domain: string) => domain.toLowerCase().endsWith(".duckdns.org");
+
+        let serverDomains: { domain: string; basePath: string; wildcard?: boolean }[] | undefined;
         if (config.server?.domains && config.server.domains.length > 0) {
             serverDomains = config.server.domains.map(d => {
                 if (typeof d === "string") {
-                    return { domain: d, basePath: basePath };
+                    // DuckDNS domains don't use basePath
+                    return { domain: d, basePath: isDuckDns(d) ? "" : basePath };
                 }
-                return { domain: d.domain, basePath: d.basePath || basePath };
+                // If basePath is explicitly set for DuckDNS, it will error in TunnelServer
+                // If not set, default to empty for DuckDNS, or global basePath for others
+                const domainBasePath = d.basePath !== undefined
+                    ? d.basePath
+                    : (isDuckDns(d.domain) ? "" : basePath);
+                return {
+                    domain: d.domain,
+                    basePath: domainBasePath,
+                    wildcard: d.wildcard,
+                };
             });
         }
+
+        // Check if we have domain configuration (single or multiple)
+        const hasDomainConfig = domain || (serverDomains && serverDomains.length > 0);
 
         // Mode detection:
         // 1. Explicit mode in config takes priority
         // 2. Auto-detect based on config:
         //    - "remote" specified -> client mode (connect to remote server)
-        //    - "domain" specified -> server mode (start local server)
-        //    - "domain" + tunnels -> hybrid mode (server + tunnels in same terminal)
+        //    - "domain" or "domains" specified -> server mode (start local server)
+        //    - "domain"/"domains" + tunnels -> hybrid mode (server + tunnels in same terminal)
         let mode: OpenTunnelMode;
 
         if (config.mode) {
@@ -1446,9 +1452,9 @@ program
             // Auto-detect
             if (remote && hasTunnels) {
                 mode = "client";
-            } else if (domain && hasTunnels) {
+            } else if (hasDomainConfig && hasTunnels) {
                 mode = "hybrid";
-            } else if (domain) {
+            } else if (hasDomainConfig) {
                 mode = "server";
             } else {
                 mode = "client"; // Default fallback
@@ -1459,7 +1465,7 @@ program
         const isServerMode = mode === "server";
         const isHybridMode = mode === "hybrid";
 
-        if (!domain && !remote) {
+        if (!hasDomainConfig && !remote) {
             console.log(chalk.red("Missing configuration."));
             console.log(chalk.gray("\nAdd to your config:"));
             console.log(chalk.cyan("\n  # Run your own server:"));
@@ -1625,6 +1631,161 @@ program
         }
     });
 
+// Restart command - stop and start again
+program
+    .command("restart [name]")
+    .description("Restart tunnels (equivalent to down + up)")
+    .option("-f, --file <file>", "Config file", "opentunnel.yml")
+    .action(async (name: string | undefined, options) => {
+        const fs = await import("fs");
+        const pathModule = await import("path");
+        const { spawn } = await import("child_process");
+
+        const registry = loadRegistry();
+        let instancesToRestart: InstanceInfo[] = [];
+
+        if (name) {
+            // Restart specific instance by name
+            instancesToRestart = registry.instances.filter(i => i.name === name);
+            if (instancesToRestart.length === 0) {
+                console.log(chalk.yellow(`Instance "${name}" not found`));
+                console.log(chalk.gray(`Use 'opentunnel ps' to list running instances`));
+                return;
+            }
+        } else {
+            // Restart instances from current directory
+            instancesToRestart = registry.instances.filter(i => i.cwd === process.cwd());
+        }
+
+        if (instancesToRestart.length === 0) {
+            console.log(chalk.yellow("No tunnels running to restart"));
+            console.log(chalk.gray("Use 'opentunnel up -d' to start tunnels"));
+            return;
+        }
+
+        console.log(chalk.cyan(`Restarting ${instancesToRestart.length} instance(s)...\n`));
+
+        for (const instance of instancesToRestart) {
+            // Step 1: Stop the instance
+            try {
+                process.kill(instance.pid, "SIGTERM");
+                console.log(chalk.yellow(`  ↓ Stopped ${instance.name}`));
+            } catch (err: any) {
+                if (err.code !== "ESRCH") {
+                    console.log(chalk.red(`  ✗ Failed to stop ${instance.name}: ${err.message}`));
+                    continue;
+                }
+            }
+
+            // Remove PID file
+            try {
+                if (fs.existsSync(instance.pidFile)) {
+                    fs.unlinkSync(instance.pidFile);
+                }
+            } catch {}
+
+            // Unregister from registry
+            unregisterInstanceByPid(instance.pid);
+
+            // Wait a bit for the process to fully stop
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            // Step 2: Start the instance again
+            const configPath = instance.configPath;
+            if (!fs.existsSync(configPath)) {
+                console.log(chalk.red(`  ✗ Config file not found: ${configPath}`));
+                continue;
+            }
+
+            // Spawn new process
+            const logFile = instance.logFile;
+            const pidFile = instance.pidFile;
+            const instanceName = instance.name;
+            const cwd = instance.cwd;
+
+            // Open file descriptor for logging (required for detached processes)
+            const logFd = fs.openSync(logFile, "a");
+
+            const child = spawn(process.execPath, [process.argv[1], "up", "-f", pathModule.basename(configPath)], {
+                cwd,
+                detached: true,
+                stdio: ["ignore", logFd, logFd],
+                env: { ...process.env, OPENTUNNEL_INSTANCE_NAME: instanceName },
+            });
+
+            child.unref();
+            fs.closeSync(logFd);
+
+            // Wait and check if process started successfully
+            await new Promise(resolve => setTimeout(resolve, 1500));
+
+            let processRunning = false;
+            try {
+                process.kill(child.pid!, 0);
+                processRunning = true;
+            } catch {
+                processRunning = false;
+            }
+
+            if (processRunning) {
+                // Process is running, register it
+                registerInstance({
+                    name: instanceName,
+                    pid: child.pid!,
+                    configPath,
+                    logFile,
+                    pidFile,
+                    cwd,
+                    startedAt: new Date().toISOString(),
+                });
+
+                // Write PID file
+                fs.writeFileSync(pidFile, child.pid!.toString());
+
+                console.log(chalk.green(`  ↑ Started ${instanceName} (PID: ${child.pid})`));
+            } else {
+                // Process failed - check logs for error
+                console.log(chalk.red(`  ✗ Failed to start ${instanceName}`));
+
+                // Read last lines of log to show error
+                if (fs.existsSync(logFile)) {
+                    const logContent = fs.readFileSync(logFile, "utf-8");
+                    const lines = logContent.split("\n");
+
+                    // Find error lines
+                    const errorLines: string[] = [];
+                    let capturing = false;
+                    for (let i = lines.length - 1; i >= 0 && errorLines.length < 10; i--) {
+                        const line = lines[i];
+                        if (line.includes("Error:") || line.includes("error:") || capturing) {
+                            errorLines.unshift(line);
+                            capturing = true;
+                        }
+                        if (line.includes("throw new Error") || line.includes("at new")) {
+                            capturing = true;
+                        }
+                    }
+
+                    if (errorLines.length > 0) {
+                        console.log(chalk.red("\n  Error details:"));
+                        console.log(chalk.gray("  " + "─".repeat(60)));
+                        // Find the actual error message
+                        const errorMsg = errorLines.find(l => l.includes("Error:"));
+                        if (errorMsg) {
+                            const match = errorMsg.match(/Error:\s*(.+)/);
+                            if (match) {
+                                console.log(chalk.red(`  ${match[1]}`));
+                            }
+                        }
+                        console.log(chalk.gray("  " + "─".repeat(60)));
+                    }
+                }
+            }
+        }
+
+        console.log();
+    });
+
 // PS command - list running tunnel processes (global)
 program
     .command("ps")
@@ -1782,6 +1943,115 @@ program
         }
     });
 
+// Logs clean command - remove log files
+program
+    .command("logs-clean [name]")
+    .description("Clean log files")
+    .option("--all", "Clean all log files")
+    .action(async (name: string | undefined, options) => {
+        const fs = await import("fs");
+        const logsDir = getLogsDir();
+
+        if (!fs.existsSync(logsDir)) {
+            console.log(chalk.yellow("No logs directory found"));
+            return;
+        }
+
+        let files: string[];
+
+        if (options.all) {
+            // Clean all log files
+            files = fs.readdirSync(logsDir).filter(f => f.endsWith(".log"));
+        } else if (name) {
+            // Clean specific instance logs
+            const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "_");
+            const logFile = `${safeName}.log`;
+            files = fs.existsSync(path.join(logsDir, logFile)) ? [logFile] : [];
+        } else {
+            console.log(chalk.yellow("Specify instance name or use --all to clean all logs"));
+            console.log(chalk.gray(`  opentunnel logs-clean <name>    Clean logs for specific instance`));
+            console.log(chalk.gray(`  opentunnel logs-clean --all     Clean all log files`));
+            return;
+        }
+
+        if (files.length === 0) {
+            console.log(chalk.yellow(name ? `No logs found for "${name}"` : "No log files found"));
+            return;
+        }
+
+        let totalSize = 0;
+        for (const file of files) {
+            const filePath = path.join(logsDir, file);
+            try {
+                const stat = fs.statSync(filePath);
+                totalSize += stat.size;
+                fs.unlinkSync(filePath);
+                console.log(chalk.green(`  ✓ Deleted ${file} (${(stat.size / 1024).toFixed(1)} KB)`));
+            } catch (err: any) {
+                console.log(chalk.red(`  ✗ Failed to delete ${file}: ${err.message}`));
+            }
+        }
+
+        console.log(chalk.gray(`\nCleaned ${files.length} file(s), freed ${(totalSize / 1024).toFixed(1)} KB`));
+        console.log(chalk.gray(`Logs directory: ${logsDir}`));
+    });
+
+// Logs list command - show logs directory and list log files
+program
+    .command("logs-list")
+    .description("List all log files and show logs directory")
+    .action(async () => {
+        const fs = await import("fs");
+        const logsDir = getLogsDir();
+
+        console.log(chalk.cyan(`Logs directory: ${logsDir}\n`));
+
+        if (!fs.existsSync(logsDir)) {
+            console.log(chalk.yellow("No logs directory found"));
+            return;
+        }
+
+        const files = fs.readdirSync(logsDir).filter(f => f.endsWith(".log") || f.endsWith(".pid"));
+
+        if (files.length === 0) {
+            console.log(chalk.yellow("No log files found"));
+            return;
+        }
+
+        const logFiles = files.filter(f => f.endsWith(".log"));
+        const pidFiles = files.filter(f => f.endsWith(".pid"));
+
+        if (logFiles.length > 0) {
+            console.log(chalk.white("Log files:"));
+            let totalSize = 0;
+            for (const file of logFiles) {
+                const filePath = path.join(logsDir, file);
+                const stat = fs.statSync(filePath);
+                const size = (stat.size / 1024).toFixed(1);
+                const modified = stat.mtime.toLocaleString();
+                totalSize += stat.size;
+                console.log(chalk.gray(`  ${file.padEnd(35)} ${size.padStart(8)} KB  ${modified}`));
+            }
+            console.log(chalk.gray(`\n  Total: ${logFiles.length} file(s), ${(totalSize / 1024).toFixed(1)} KB`));
+        }
+
+        if (pidFiles.length > 0) {
+            console.log(chalk.white("\nPID files (active instances):"));
+            for (const file of pidFiles) {
+                const filePath = path.join(logsDir, file);
+                const pid = fs.readFileSync(filePath, "utf-8").trim();
+                const name = file.replace(".pid", "");
+                let status = chalk.green("running");
+                try {
+                    process.kill(parseInt(pid), 0);
+                } catch {
+                    status = chalk.red("stale");
+                }
+                console.log(chalk.gray(`  ${name.padEnd(35)} PID: ${pid.padStart(6)}  ${status}`));
+            }
+        }
+    });
+
 // Test server command - simple HTTP server for testing tunnels
 program
     .command("test-server")
@@ -1797,8 +2067,8 @@ program
             const fs = await import("fs");
             const path = await import("path");
 
-            const pidFile = path.join(process.cwd(), `.test-server-${port}.pid`);
-            const logFile = path.join(process.cwd(), `test-server-${port}.log`);
+            const pidFile = getPidFilePath(`test-server-${port}`);
+            const logFile = getLogFilePath(`test-server-${port}`);
 
             if (fs.existsSync(pidFile)) {
                 const oldPid = fs.readFileSync(pidFile, "utf-8").trim();
@@ -1897,24 +2167,28 @@ program
     .option("-p, --port <port>", "Stop specific port")
     .action(async (options) => {
         const fs = await import("fs");
-        const path = await import("path");
 
+        const logsDir = getLogsDir();
         let pidFiles: string[];
 
         if (options.port) {
-            const specific = `.test-server-${options.port}.pid`;
-            pidFiles = fs.existsSync(path.join(process.cwd(), specific)) ? [specific] : [];
-        } else pidFiles = fs.readdirSync(process.cwd()).filter(f => f.startsWith(".test-server-") && f.endsWith(".pid"));
+            const pidPath = getPidFilePath(`test-server-${options.port}`);
+            pidFiles = fs.existsSync(pidPath) ? [pidPath] : [];
+        } else {
+            pidFiles = fs.readdirSync(logsDir)
+                .filter(f => f.startsWith("test-server-") && f.endsWith(".pid"))
+                .map(f => path.join(logsDir, f));
+        }
 
         if (pidFiles.length === 0) {
             console.log(chalk.yellow("No test servers running"));
             return;
         }
 
-        for (const pidFile of pidFiles) {
-            const pidPath = path.join(process.cwd(), pidFile);
+        for (const pidPath of pidFiles) {
             const pid = parseInt(fs.readFileSync(pidPath, "utf-8").trim());
-            const port = pidFile.replace(".test-server-", "").replace(".pid", "");
+            const fileName = path.basename(pidPath);
+            const port = fileName.replace("test-server-", "").replace(".pid", "");
 
             try {
                 process.kill(pid, "SIGTERM");
@@ -1939,8 +2213,8 @@ async function runTunnelInBackgroundFromConfig(
     const fs = await import("fs");
     const path = await import("path");
 
-    const pidFile = path.join(process.cwd(), `.opentunnel-${name}.pid`);
-    const logFile = path.join(process.cwd(), `opentunnel-${name}.log`);
+    const pidFile = getPidFilePath(name);
+    const logFile = getLogFilePath(name);
 
     // Check if already running
     if (fs.existsSync(pidFile)) {
@@ -2079,8 +2353,8 @@ async function runTunnelInBackground(command: string, port: string, options: any
     const path = await import("path");
 
     const tunnelId = `tunnel-${port}-${Date.now()}`;
-    const pidFile = path.join(process.cwd(), `.opentunnel-${port}.pid`);
-    const logFile = path.join(process.cwd(), `opentunnel-${port}.log`);
+    const pidFile = getPidFilePath(`tunnel-${port}`);
+    const logFile = getLogFilePath(`tunnel-${port}`);
 
     // Check if already running
     if (fs.existsSync(pidFile)) {

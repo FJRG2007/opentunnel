@@ -1,0 +1,12 @@
+name: multi-domains-client-1
+
+server:
+  remote: ${DOMAIN:-fjrg2007.com}
+  token: ${AUTH_TOKEN}                    # From .env (required for private servers)
+
+tunnels:
+  - name: frontend
+    protocol: http
+    port: 3000
+    subdomain: app                        # → app.op.fjrg2007.com
+    autostart: true

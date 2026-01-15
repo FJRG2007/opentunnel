@@ -43,6 +43,7 @@ interface Client {
     createdAt: Date;
     lastPong: number;
     isAlive: boolean;
+    connectedDomain: DomainConfig;  // The domain this client connected through
 }
 
 interface Tunnel {
@@ -81,6 +82,7 @@ export class TunnelServer extends EventEmitter {
     private keepaliveInterval: NodeJS.Timeout | null = null;
     private certManager: CertManager | null = null;
     private isHttps: boolean = false;
+    private sslCredentials: { cert: string; key: string } | null = null;  // Store SSL creds for port-based tunnels
     private dnsProvider: CloudflareDNS | DuckDNS | null = null;
 
     constructor(config: Partial<ServerConfig>) {
@@ -97,12 +99,38 @@ export class TunnelServer extends EventEmitter {
 
         // Initialize multi-domain support
         if (this.config.domains && this.config.domains.length > 0) {
-            this.domains = this.config.domains;
+            // Validate and process domains
+            for (const d of this.config.domains) {
+                if (this.isDuckDnsDomain(d.domain) && d.basePath && d.basePath !== "") {
+                    throw new Error(
+                        `Invalid configuration for '${d.domain}': DuckDNS domains don't support subdomains. ` +
+                        `Remove 'basePath' or set it to empty string "". ` +
+                        `Tunnels will use port-based routing: ${d.domain}:<port>`
+                    );
+                }
+            }
+
+            // Process domains and auto-detect wildcard support
+            this.domains = this.config.domains.map(d => ({
+                ...d,
+                basePath: this.isDuckDnsDomain(d.domain) ? "" : d.basePath,  // Force empty basePath for DuckDNS
+                // Auto-detect: DuckDNS domains don't support wildcards
+                wildcard: d.wildcard !== undefined ? d.wildcard : !this.isDuckDnsDomain(d.domain),
+            }));
         } else {
             // Single domain (backward compatible)
+            const isDuckDns = this.isDuckDnsDomain(this.config.domain);
+            if (isDuckDns && this.config.basePath && this.config.basePath !== "") {
+                throw new Error(
+                    `Invalid configuration for '${this.config.domain}': DuckDNS domains don't support subdomains. ` +
+                    `Remove 'basePath' or set it to empty string "". ` +
+                    `Tunnels will use port-based routing: ${this.config.domain}:<port>`
+                );
+            }
             this.domains = [{
                 domain: this.config.domain,
-                basePath: this.config.basePath,
+                basePath: isDuckDns ? "" : this.config.basePath,
+                wildcard: !isDuckDns,
             }];
         }
 
@@ -195,14 +223,20 @@ export class TunnelServer extends EventEmitter {
         return { allowed: true };
     }
 
+    // Check if a domain is a DuckDNS domain (doesn't support wildcards)
+    private isDuckDnsDomain(domain: string): boolean {
+        return domain.toLowerCase().endsWith(".duckdns.org");
+    }
+
     private async setupHttps(): Promise<void> {
         if (this.config.https) {
             // Manual HTTPS with provided certificates
             this.logger.info("Setting up HTTPS with provided certificates");
-            this.httpServer = https.createServer({
+            this.sslCredentials = {
                 cert: this.config.https.cert,
                 key: this.config.https.key,
-            });
+            };
+            this.httpServer = https.createServer(this.sslCredentials);
             this.isHttps = true;
         } else if (this.config.selfSignedHttps?.enabled) {
             // Self-signed certificates (local/development)
@@ -216,10 +250,11 @@ export class TunnelServer extends EventEmitter {
             const certDomains = this.domains.map(d => `${d.basePath}.${d.domain}`);
             const certInfo = this.certManager.getOrCreateSelfSignedCert(certDomains);
 
-            this.httpServer = https.createServer({
+            this.sslCredentials = {
                 cert: certInfo.cert,
                 key: certInfo.key,
-            });
+            };
+            this.httpServer = https.createServer(this.sslCredentials);
 
             this.isHttps = true;
             this.logger.info(`Self-signed certificate valid until: ${certInfo.expiresAt.toISOString()}`);
@@ -285,10 +320,11 @@ export class TunnelServer extends EventEmitter {
             }
 
             // Create HTTPS server with the certificate
-            this.httpServer = https.createServer({
+            this.sslCredentials = {
                 cert: certInfo.cert,
                 key: certInfo.key,
-            });
+            };
+            this.httpServer = https.createServer(this.sslCredentials);
 
             // Create HTTP redirect server
             this.httpRedirectServer = http.createServer((req, res) => {
@@ -345,9 +381,14 @@ export class TunnelServer extends EventEmitter {
                 this.logger.info(`Server started on ${this.config.host}:${port} (${protocol.toUpperCase()})`);
 
                 // Log all configured domains
-                for (const { domain, basePath } of this.domains) {
+                for (const domainConfig of this.domains) {
+                    const { domain, basePath, wildcard } = domainConfig;
                     this.logger.info(`Domain: ${domain}`);
-                    this.logger.info(`  Subdomain pattern: *.${basePath}.${domain}`);
+                    if (wildcard !== false) {
+                        this.logger.info(`  Mode: Subdomain-based (*.${basePath}.${domain})`);
+                    } else {
+                        this.logger.info(`  Mode: Port-based (${domain}:<port>) - No wildcard support`);
+                    }
                 }
 
                 if (this.isHttps) {
@@ -524,6 +565,24 @@ export class TunnelServer extends EventEmitter {
             return;
         }
 
+        // Determine which domain the client connected to
+        const host = request.headers.host || "";
+        const hostWithoutPort = host.split(":")[0].toLowerCase();
+        let connectedDomain = this.domains[0]; // Default to first domain
+
+        // Try to match the host to one of our configured domains
+        for (const domainConfig of this.domains) {
+            const expectedHost = `${domainConfig.basePath}.${domainConfig.domain}`.toLowerCase();
+            const expectedHostDirect = domainConfig.domain.toLowerCase();
+
+            if (hostWithoutPort === expectedHost ||
+                hostWithoutPort === expectedHostDirect ||
+                hostWithoutPort.endsWith(`.${domainConfig.domain.toLowerCase()}`)) {
+                connectedDomain = domainConfig;
+                break;
+            }
+        }
+
         const clientId = generateId();
         const client: Client = {
             id: clientId,
@@ -533,10 +592,11 @@ export class TunnelServer extends EventEmitter {
             createdAt: new Date(),
             lastPong: Date.now(),
             isAlive: true,
+            connectedDomain,
         };
 
         this.clients.set(clientId, client);
-        this.logger.info(`Client connected: ${clientId} (IP: ${clientIp})`);
+        this.logger.info(`Client connected: ${clientId} (IP: ${clientIp}, Domain: ${connectedDomain.domain})`);
 
         // Handle WebSocket-level pong (response to our ping)
         ws.on("pong", () => {
@@ -645,60 +705,131 @@ export class TunnelServer extends EventEmitter {
         let publicUrl: string;
 
         if (config.protocol === "http" || config.protocol === "https") {
-            // HTTP tunnel - use subdomain pattern: subdomain.op.domain.com
-            const subdomain = config.subdomain || generateSubdomain();
-
-            if (this.tunnelsBySubdomain.has(subdomain)) {
-                this.send(client.ws, {
-                    type: "tunnel_response",
-                    id: generateId(),
-                    timestamp: Date.now(),
-                    success: false,
-                    error: `Subdomain '${subdomain}' is already in use`,
-                });
-                return;
-            }
-
-            // Use first configured domain as the primary
-            const primaryDomain = this.domains[0];
+            // Use the domain the client connected to
+            const clientDomain = client.connectedDomain;
             const protocol = this.isHttps ? "https" : "http";
-            // Third-level subdomain pattern: myapp.op.domain.com
-            publicUrl = `${protocol}://${subdomain}.${primaryDomain.basePath}.${primaryDomain.domain}`;
 
-            // Add port to URL only if not default (80 for http, 443 for https)
-            const publicPort = this.config.publicPort || this.config.port;
-            const isDefaultPort = (protocol === "http" && publicPort === 80) ||
-                                  (protocol === "https" && publicPort === 443);
-            if (!isDefaultPort) {
-                publicUrl += `:${publicPort}`;
-            }
+            // Check if domain supports wildcards (subdomains)
+            if (clientDomain.wildcard !== false) {
+                // WILDCARD DOMAIN: use subdomain pattern: subdomain.op.domain.com
+                const subdomain = config.subdomain || generateSubdomain();
 
-            const tunnel: Tunnel = {
-                id: tunnelId,
-                config: { ...config, id: tunnelId, subdomain },
-                client,
-                publicUrl,
-                tcpConnections: new Map(),
-                stats: { bytesIn: 0, bytesOut: 0, connections: 0 },
-                createdAt: new Date(),
-            };
+                if (this.tunnelsBySubdomain.has(subdomain)) {
+                    this.send(client.ws, {
+                        type: "tunnel_response",
+                        id: generateId(),
+                        timestamp: Date.now(),
+                        success: false,
+                        error: `Subdomain '${subdomain}' is already in use`,
+                    });
+                    return;
+                }
 
-            this.tunnelsBySubdomain.set(subdomain, tunnel);
-            client.tunnels.set(tunnelId, tunnel);
+                // Third-level subdomain pattern: myapp.op.domain.com
+                publicUrl = `${protocol}://${subdomain}.${clientDomain.basePath}.${clientDomain.domain}`;
 
-            this.logger.info(`HTTP tunnel: ${subdomain}.${primaryDomain.basePath}.${primaryDomain.domain} -> ${config.localHost}:${config.localPort}`);
+                // Add port to URL only if not default (80 for http, 443 for https)
+                const publicPort = this.config.publicPort || this.config.port;
+                const isDefaultPort = (protocol === "http" && publicPort === 80) ||
+                                      (protocol === "https" && publicPort === 443);
+                if (!isDefaultPort) {
+                    publicUrl += `:${publicPort}`;
+                }
 
-            // Create DNS record if auto DNS is enabled (Cloudflare only)
-            if (this.dnsProvider &&
-                this.config.autoDns?.createRecords !== false &&
-                this.dnsProvider instanceof CloudflareDNS) {
-                this.dnsProvider.updateRecord(subdomain).then((success) => {
-                    if (success) {
-                        this.logger.info(`DNS record created for ${subdomain}`);
+                const tunnel: Tunnel = {
+                    id: tunnelId,
+                    config: { ...config, id: tunnelId, subdomain },
+                    client,
+                    publicUrl,
+                    tcpConnections: new Map(),
+                    stats: { bytesIn: 0, bytesOut: 0, connections: 0 },
+                    createdAt: new Date(),
+                };
+
+                this.tunnelsBySubdomain.set(subdomain, tunnel);
+                client.tunnels.set(tunnelId, tunnel);
+
+                this.logger.info(`HTTP tunnel: ${subdomain}.${clientDomain.basePath}.${clientDomain.domain} -> ${config.localHost}:${config.localPort}`);
+
+                // Create DNS record if auto DNS is enabled (Cloudflare only)
+                if (this.dnsProvider &&
+                    this.config.autoDns?.createRecords !== false &&
+                    this.dnsProvider instanceof CloudflareDNS) {
+                    this.dnsProvider.updateRecord(subdomain).then((success) => {
+                        if (success) {
+                            this.logger.info(`DNS record created for ${subdomain}`);
+                        }
+                    }).catch((err) => {
+                        this.logger.warn(`Failed to create DNS record: ${err.message}`);
+                    });
+                }
+            } else {
+                // NON-WILDCARD DOMAIN (e.g., DuckDNS): use port-based routing
+                let port: number | null = null;
+
+                if (config.remotePort) {
+                    // User explicitly requested this port
+                    if (this.usedPorts.has(config.remotePort)) {
+                        this.send(client.ws, {
+                            type: "tunnel_response",
+                            id: generateId(),
+                            timestamp: Date.now(),
+                            success: false,
+                            error: `Port ${config.remotePort} is already in use`,
+                        });
+                        return;
                     }
-                }).catch((err) => {
-                    this.logger.warn(`Failed to create DNS record: ${err.message}`);
+                    port = config.remotePort;
+                } else {
+                    // Find next available port
+                    port = getNextAvailablePort(
+                        this.config.tunnelPortRange.min,
+                        this.config.tunnelPortRange.max,
+                        this.usedPorts
+                    );
+                }
+
+                if (!port) {
+                    this.send(client.ws, {
+                        type: "tunnel_response",
+                        id: generateId(),
+                        timestamp: Date.now(),
+                        success: false,
+                        error: "No available ports for HTTP tunnel",
+                    });
+                    return;
+                }
+
+                // URL is domain:port (no subdomain)
+                publicUrl = `${protocol}://${clientDomain.domain}:${port}`;
+
+                const tunnel: Tunnel = {
+                    id: tunnelId,
+                    config: { ...config, id: tunnelId, remotePort: port },
+                    client,
+                    publicUrl,
+                    tcpConnections: new Map(),
+                    stats: { bytesIn: 0, bytesOut: 0, connections: 0 },
+                    createdAt: new Date(),
+                };
+
+                // Create HTTP server for this tunnel's port
+                const httpTunnelServer = (this.isHttps && this.sslCredentials)
+                    ? https.createServer(this.sslCredentials)
+                    : http.createServer();
+
+                httpTunnelServer.on("request", (req, res) => {
+                    this.handlePortBasedHttpRequest(tunnel, req, res);
                 });
+
+                httpTunnelServer.listen(port, this.config.host, () => {
+                    this.logger.info(`HTTP tunnel (port-based): ${clientDomain.domain}:${port} -> ${config.localHost}:${config.localPort}`);
+                });
+
+                tunnel.tcpServer = httpTunnelServer as net.Server;
+                this.usedPorts.add(port);
+                this.tunnelsByPort.set(port, tunnel);
+                client.tunnels.set(tunnelId, tunnel);
             }
 
         } else if (config.protocol === "tcp") {
@@ -920,6 +1051,50 @@ export class TunnelServer extends EventEmitter {
                 res.writeHead(response.statusCode, response.headers as http.OutgoingHttpHeaders);
                 if (response.body) {
                     // Decode base64 if the response body is encoded (for binary data like gzip)
+                    const bodyBuffer = response.isBase64
+                        ? Buffer.from(response.body, "base64")
+                        : Buffer.from(response.body, "utf-8");
+                    tunnel.stats.bytesOut += bodyBuffer.length;
+                    res.end(bodyBuffer);
+                } else {
+                    res.end();
+                }
+            } catch (err) {
+                res.writeHead(502, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: "Bad gateway - tunnel client not responding" }));
+            }
+        });
+    }
+
+    // Handle HTTP requests for port-based tunnels (non-wildcard domains like DuckDNS)
+    private async handlePortBasedHttpRequest(tunnel: Tunnel, req: IncomingMessage, res: ServerResponse): Promise<void> {
+        const requestId = generateId();
+        const bodyChunks: Buffer[] = [];
+
+        req.on("data", (chunk) => bodyChunks.push(chunk));
+        req.on("end", async () => {
+            const body = Buffer.concat(bodyChunks).toString();
+
+            const httpRequest: HttpRequestMessage = {
+                type: "http_request",
+                id: generateId(),
+                timestamp: Date.now(),
+                tunnelId: tunnel.id,
+                requestId,
+                method: req.method || "GET",
+                path: req.url || "/",
+                headers: req.headers as Record<string, string | string[] | undefined>,
+                body: body || undefined,
+            };
+
+            tunnel.stats.bytesIn += body.length;
+            tunnel.stats.connections++;
+
+            try {
+                const response = await this.waitForResponse(tunnel, requestId, httpRequest);
+
+                res.writeHead(response.statusCode, response.headers as http.OutgoingHttpHeaders);
+                if (response.body) {
                     const bodyBuffer = response.isBase64
                         ? Buffer.from(response.body, "base64")
                         : Buffer.from(response.body, "utf-8");
