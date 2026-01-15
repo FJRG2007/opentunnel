@@ -161,6 +161,61 @@ function unregisterInstanceByPid(pid: number): void {
     saveRegistry(registry);
 }
 
+// Global CLI configuration
+interface CLIConfig {
+    defaultDomain?: {
+        domain: string;
+        basePath?: string;
+    };
+}
+
+function getConfigPath(): string {
+    const os = require("os");
+    const configDir = path.join(os.homedir(), ".opentunnel");
+    return path.join(configDir, "config.json");
+}
+
+function loadCLIConfig(): CLIConfig {
+    const configPath = getConfigPath();
+    try {
+        if (fs.existsSync(configPath)) {
+            return JSON.parse(fs.readFileSync(configPath, "utf-8"));
+        }
+    } catch {}
+    return {};
+}
+
+function saveCLIConfig(config: CLIConfig): void {
+    const configPath = getConfigPath();
+    const dir = path.dirname(configPath);
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+}
+
+function getDefaultDomain(): { domain: string; basePath?: string } | null {
+    const config = loadCLIConfig();
+    return config.defaultDomain || null;
+}
+
+function setDefaultDomain(domain: string, basePath?: string): void {
+    const config = loadCLIConfig();
+    config.defaultDomain = { domain };
+    if (basePath) config.defaultDomain.basePath = basePath;
+    saveCLIConfig(config);
+}
+
+function clearDefaultDomain(): boolean {
+    const config = loadCLIConfig();
+    if (config.defaultDomain) {
+        delete config.defaultDomain;
+        saveCLIConfig(config);
+        return true;
+    }
+    return false;
+}
+
 // Load .env file if exists
 function loadEnvFile(): void {
     const envPath = path.join(process.cwd(), ".env");
@@ -223,7 +278,7 @@ program
     .name("opentunnel")
     .alias("ot")
     .description("Expose local ports to the internet via custom domains or ngrok")
-    .version("1.0.20");
+    .version("1.0.21");
 
 // Helper function to build WebSocket URL from domain
 // User only provides base domain (e.g., fjrg2007.com), system handles the rest
@@ -437,6 +492,196 @@ program
             console.log(chalk.gray("  - Verify the server domain is correct"));
             console.log(chalk.gray("  - Make sure the server is running"));
             console.log("");
+            process.exit(1);
+        }
+    });
+
+// Domain management commands
+program
+    .command("setdomain <domain>")
+    .description("Set a default domain for quick tunnels")
+    .option("-b, --base-path <path>", "Server base path (default: op)")
+    .action((domain: string, options) => {
+        setDefaultDomain(domain, options.basePath);
+        console.log(chalk.green(`\n  Default domain set to: ${chalk.cyan(domain)}`));
+        if (options.basePath) {
+            console.log(chalk.gray(`  Base path: ${options.basePath}`));
+        }
+        console.log(chalk.gray(`\n  Now you can use 'opentunnel expl <port>' without specifying -s\n`));
+    });
+
+program
+    .command("getdomain")
+    .description("Show the default domain configuration")
+    .action(() => {
+        const config = getDefaultDomain();
+        if (config) {
+            console.log(chalk.cyan("\n  Default Domain Configuration"));
+            console.log(chalk.gray("  ─────────────────────────────"));
+            console.log(`  ${chalk.white("Domain:")}    ${chalk.green(config.domain)}`);
+            if (config.basePath) {
+                console.log(`  ${chalk.white("Base Path:")} ${chalk.gray(config.basePath)}`);
+            }
+            console.log("");
+        } else {
+            console.log(chalk.yellow("\n  No default domain configured"));
+            console.log(chalk.gray("  Use 'opentunnel setdomain <domain>' to set one\n"));
+        }
+    });
+
+program
+    .command("cleardomain")
+    .description("Remove the default domain configuration")
+    .action(() => {
+        if (clearDefaultDomain()) {
+            console.log(chalk.green("\n  Default domain configuration removed\n"));
+        } else {
+            console.log(chalk.yellow("\n  No default domain was configured\n"));
+        }
+    });
+
+// Expose Local Server command (shortcut for quick --local-server)
+program
+    .command("expl <port>")
+    .description("Expose local port via local server (shortcut for 'quick <port> --local-server')")
+    .option("-s, --domain <domain>", "Server domain (uses default if not specified)")
+    .option("-b, --base-path <path>", "Server base path (default: op)")
+    .option("-n, --subdomain <name>", "Request a specific subdomain (e.g., 'myapp')")
+    .option("-p, --protocol <proto>", "Protocol (http, https, tcp)", "http")
+    .option("-h, --host <host>", "Local host to forward to", "localhost")
+    .option("-t, --token <token>", "Authentication token (if server requires it)")
+    .option("--insecure", "Skip SSL certificate verification (for self-signed certs)")
+    .option("--server-port <port>", "Port for the local server (default: 443)", "443")
+    .action(async (port: string, options) => {
+        // Get domain from options or default config
+        let domain = options.domain;
+        let basePath = options.basePath;
+
+        if (!domain) {
+            const defaultConfig = getDefaultDomain();
+            if (defaultConfig) {
+                domain = defaultConfig.domain;
+                if (!basePath && defaultConfig.basePath) {
+                    basePath = defaultConfig.basePath;
+                }
+            }
+        }
+
+        if (!domain) {
+            console.log(chalk.red("Error: No domain specified and no default domain configured"));
+            console.log(chalk.gray("\nOptions:"));
+            console.log(chalk.cyan("  1. Specify domain: opentunnel expl 3000 -s example.com"));
+            console.log(chalk.cyan("  2. Set default:    opentunnel setdomain example.com"));
+            process.exit(1);
+        }
+
+        const { TunnelServer } = await import("../server/TunnelServer");
+        const serverPort = parseInt(options.serverPort);
+
+        console.log(chalk.cyan(`
+ ██████╗ ██████╗ ███████╗███╗   ██╗████████╗██╗   ██╗███╗   ██╗███╗   ██╗███████╗██╗
+██╔═══██╗██╔══██╗██╔════╝████╗  ██║╚══██╔══╝██║   ██║████╗  ██║████╗  ██║██╔════╝██║
+██║   ██║██████╔╝█████╗  ██╔██╗ ██║   ██║   ██║   ██║██╔██╗ ██║██╔██╗ ██║█████╗  ██║
+██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║   ██║   ██║   ██║██║╚██╗██║██║╚██╗██║██╔══╝  ██║
+╚██████╔╝██║     ███████╗██║ ╚████║   ██║   ╚██████╔╝██║ ╚████║██║ ╚████║███████╗███████╗
+ ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚══════╝
+`));
+        console.log(chalk.gray(`  Starting local server on port ${serverPort}...\n`));
+
+        let localServer: any;
+        try {
+            localServer = new TunnelServer({
+                port: serverPort,
+                host: "0.0.0.0",
+                domain: domain,
+                basePath: basePath || "op",
+                tunnelPortRange: { min: 10000, max: 20000 },
+                selfSignedHttps: { enabled: true },
+                auth: options.token ? { required: true, tokens: [options.token] } : undefined,
+            });
+
+            await localServer.start();
+            console.log(chalk.green(`  Server running on port ${serverPort}\n`));
+        } catch (err: any) {
+            console.log(chalk.red(`Failed to start server: ${err.message}`));
+            process.exit(1);
+        }
+
+        // Connect to local server
+        const serverUrl = `wss://localhost:${serverPort}/_tunnel`;
+        const spinner = ora("Connecting to local server...").start();
+
+        try {
+            const client = new TunnelClient({
+                serverUrl,
+                token: options.token,
+                reconnect: true,
+                silent: true,
+                rejectUnauthorized: false // Local server uses self-signed cert
+            });
+
+            await client.connect();
+            spinner.text = "Creating tunnel...";
+
+            const { tunnelId, publicUrl } = await client.createTunnel({
+                protocol: options.protocol as TunnelProtocol,
+                localHost: options.host,
+                localPort: parseInt(port),
+                subdomain: options.subdomain,
+            });
+
+            spinner.succeed("Tunnel established!");
+
+            console.log("");
+            console.log(chalk.cyan(`  OpenTunnel ${chalk.gray(`(local server → ${domain})`)}`));
+            console.log(chalk.gray("  ─────────────────────────────────────────"));
+            console.log(`  ${chalk.white("Status:")}    ${chalk.green("● Online")}`);
+            console.log(`  ${chalk.white("Protocol:")}  ${chalk.yellow(options.protocol.toUpperCase())}`);
+            console.log(`  ${chalk.white("Local:")}     ${chalk.gray(`${options.host}:${port}`)}`);
+            console.log(`  ${chalk.white("Public:")}    ${chalk.green(publicUrl)}`);
+            console.log(chalk.gray("  ─────────────────────────────────────────"));
+            console.log("");
+            console.log(chalk.gray("  Press Ctrl+C to close the tunnel"));
+            console.log("");
+
+            // Keep alive with uptime counter
+            const startTime = Date.now();
+            const statsInterval = setInterval(() => {
+                const uptime = formatDuration(Date.now() - startTime);
+                process.stdout.write(`\r  ${chalk.gray(`Uptime: ${uptime}`)}`);
+            }, 1000);
+
+            // Handle exit
+            const cleanup = async () => {
+                clearInterval(statsInterval);
+                console.log("\n");
+                const closeSpinner = ora("Closing tunnel...").start();
+                await client.closeTunnel(tunnelId);
+                await client.disconnect();
+                if (localServer) {
+                    await localServer.stop();
+                }
+                closeSpinner.succeed("Tunnel closed");
+                process.exit(0);
+            };
+
+            process.on("SIGINT", cleanup);
+            process.on("SIGTERM", cleanup);
+
+            // Handle reconnection
+            client.on("disconnected", () => {
+                console.log(chalk.yellow("\n  Disconnected, reconnecting..."));
+            });
+
+            client.on("connected", () => {
+                console.log(chalk.green("  Reconnected!"));
+            });
+
+        } catch (err: any) {
+            spinner.fail(`Failed: ${err.message}`);
+            if (localServer) {
+                await localServer.stop();
+            }
             process.exit(1);
         }
     });

@@ -15,6 +15,8 @@
 - [Configuration File](#-configuration-file) - opentunnel.yml reference
   - [Environment Variables](#environment-variables) - Docker-style ${VAR:-default} syntax
 - [Commands Reference](#-commands-reference)
+  - [Expose Local (expl)](#expose-local-command-expl) - Fastest way to expose a port
+  - [Domain Configuration](#domain-configuration) - Set default domain
 
 ---
 
@@ -34,12 +36,31 @@ npx opentunnel-cli quick 3000 -s example.com
 
 ## Quick Start
 
-### Option 1: Quick Command
+### Option 1: Expose Local (Recommended for Home Use)
 
-The fastest way to expose a port:
+The fastest way to expose a port with your own domain:
 
 ```bash
+# First, set your default domain (one time only)
+opentunnel setdomain yourdomain.com
+
+# Then expose any port with a single command
+opentunnel expl 3000
+```
+
+This starts a local server and exposes your port. Requires your domain to point to your machine (with port forwarding if behind NAT).
+[Check this](#-home-use-behind-routernat) - Run from home network
+
+### Option 2: Quick Command
+
+Connect to an existing OpenTunnel server:
+
+```bash
+# Connect to a remote OpenTunnel server
 opentunnel quick 3000 -s example.com
+
+# Or start your own local server
+opentunnel quick 3000 -s yourdomain.com --local-server
 ```
 
 Your local port 3000 is now accessible from the internet:
@@ -59,9 +80,10 @@ opentunnel quick 3000 -s example.com -t SECRET          # With auth token
 opentunnel quick 3000 -s example.com --insecure         # Self-signed cert
 opentunnel quick 3000 -s example.com -b ""              # No basePath (direct domain)
 opentunnel quick 3000 -s yourdomain.com --local-server  # Start server + tunnel in one terminal
+# 
 ```
 
-### Option 2: HTTP/TCP Commands
+### Option 3: HTTP/TCP Commands
 
 More control with specific commands:
 
@@ -78,7 +100,7 @@ opentunnel tcp 5432 -s example.com -r 15432
 opentunnel tcp 5432 --domain example.com --remote-port 15432
 ```
 
-### Option 3: Using Config File
+### Option 4: Using Config File
 
 Create `opentunnel.yml`:
 
@@ -330,7 +352,14 @@ opentunnel quick 3000 -s yourdomain.duckdns.org
 For the simplest setup, expose a local port while running the server:
 
 ```bash
-# Start server + tunnel in one command
+# Easiest: set default domain once, then use expl
+opentunnel setdomain yourdomain.duckdns.org
+opentunnel expl 3000
+
+# Or specify domain each time
+opentunnel expl 3000 -s yourdomain.duckdns.org
+
+# Alternative with quick command
 opentunnel quick 3000 -s yourdomain.duckdns.org --local-server
 
 # Or with config file
@@ -705,6 +734,13 @@ opentunnel up         # Starts server + all tunnels
 
 **Quick hybrid start (no config file):**
 ```bash
+# Easiest way (with default domain set)
+opentunnel expl 3000
+
+# Or with explicit domain
+opentunnel expl 3000 -s yourdomain.com
+
+# Alternative
 opentunnel quick 3000 -s yourdomain.com --local-server
 ```
 
@@ -725,6 +761,7 @@ opentunnel ps         # Show running processes
 
 | Command | Description |
 |---------|-------------|
+| `opentunnel expl <port>` | Expose local port via local server (uses default domain) |
 | `opentunnel quick <port> -s <domain>` | Quick tunnel to a server |
 | `opentunnel http <port>` | HTTP tunnel with options |
 | `opentunnel tcp <port>` | TCP tunnel with options |
@@ -735,6 +772,65 @@ opentunnel ps         # Show running processes
 | `opentunnel stop` | Stop server |
 | `opentunnel ps` | List running processes |
 | `opentunnel init` | Create config file |
+| `opentunnel setdomain <domain>` | Set default domain for expl command |
+| `opentunnel getdomain` | Show current default domain |
+| `opentunnel cleardomain` | Remove default domain configuration |
+
+## Expose Local Command (expl)
+
+The simplest way to expose a local port. Starts a local server and creates a tunnel automatically.
+
+```bash
+opentunnel expl <port> [options]
+
+Options:
+  -s, --domain <domain>       Server domain (uses default if not specified)
+  -b, --base-path <path>      Server base path (default: op)
+  -n, --subdomain <name>      Request specific subdomain
+  -p, --protocol <proto>      http, https, or tcp (default: http)
+  -h, --host <host>           Local host (default: localhost)
+  -t, --token <token>         Authentication token
+  --insecure                  Skip SSL verification
+  --server-port <port>        Port for local server (default: 443)
+```
+
+**Examples:**
+```bash
+# With default domain configured
+opentunnel expl 3000
+
+# With explicit domain
+opentunnel expl 3000 -s example.com
+
+# With subdomain
+opentunnel expl 3000 -n myapp
+```
+
+## Domain Configuration
+
+Set a default domain so you don't need to specify `-s` every time:
+
+```bash
+# Set default domain
+opentunnel setdomain example.com
+opentunnel setdomain example.com -b op    # with custom base path
+
+# View current configuration
+opentunnel getdomain
+
+# Remove default domain
+opentunnel cleardomain
+```
+
+Configuration is stored in `~/.opentunnel/config.json`:
+```json
+{
+  "defaultDomain": {
+    "domain": "example.com",
+    "basePath": "op"
+  }
+}
+```
 
 ## Quick Command
 
