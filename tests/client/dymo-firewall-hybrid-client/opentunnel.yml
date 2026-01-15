@@ -1,0 +1,26 @@
+name: dymo-firewall-hybrid-client
+mode: hybrid
+
+server:
+  domain: ${DOMAIN:-fjrg2007.com}
+  token: ${AUTH_TOKEN}                    # From .env (required for private servers)
+  dymo:
+    apiKey: ${DYMO_API_KEY}
+
+tunnels:
+  - name: frontend
+    protocol: http
+    port: 3000
+    subdomain: app                        # → app.op.fjrg2007.com
+    autostart: true
+
+  - name: backend
+    protocol: http
+    port: 4000
+    subdomain: api                        # → api.op.fjrg2007.com
+
+  - name: database
+    protocol: tcp
+    port: 5432
+    remotePort: 15432                     # → fjrg2007.com:15432
+    autostart: false

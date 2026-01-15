@@ -1,6 +1,6 @@
 {
     "name": "opentunnel-cli",
-    "version": "1.0.21",
+    "version": "1.0.23",
     "description": "Self-hosted tunnel solution to expose local ports to the internet via custom domains",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
@@ -50,6 +50,7 @@
         "chalk": "^4.1.2",
         "cloudflare": "^5.2.0",
         "commander": "^11.1.0",
+        "dymo-api": "^1.2.30",
         "nanoid": "^3.3.7",
         "node-forge": "^1.3.3",
         "ora": "^5.4.1",

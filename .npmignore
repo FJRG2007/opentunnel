@@ -6,3 +6,4 @@ tests
 deploy
 .opentunnel.pid
 opentunnel.log
+docs

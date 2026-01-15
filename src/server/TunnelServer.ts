@@ -16,6 +16,7 @@ import {
     AuthMessage,
     DnsProvider,
     IpAccessConfig,
+    DymoConfig,
 } from "../shared/types";
 import {
     generateId,
@@ -34,6 +35,14 @@ import { DomainConfig } from "../shared/types";
 import { CertManager } from "./CertManager";
 import { CloudflareDNS } from "../dns/CloudflareDNS";
 import { DuckDNS } from "../dns/DuckDNS";
+
+// Dynamic import for optional Dymo API
+let DymoAPI: any = null;
+try {
+    DymoAPI = require("dymo-api").default;
+} catch {
+    // dymo-api not installed or not available
+}
 
 interface Client {
     id: string;
@@ -84,6 +93,9 @@ export class TunnelServer extends EventEmitter {
     private isHttps: boolean = false;
     private sslCredentials: { cert: string; key: string } | null = null;  // Store SSL creds for port-based tunnels
     private dnsProvider: CloudflareDNS | DuckDNS | null = null;
+    private dymoClient: any = null;  // Optional Dymo API client for fraud detection
+    private dymoCache: Map<string, { allowed: boolean; reason?: string; timestamp: number }> = new Map();  // Cache for Dymo verification results
+    private dymoCacheTTL: number = 5 * 60 * 1000;  // 5 minutes cache TTL
 
     constructor(config: Partial<ServerConfig>) {
         super();
@@ -132,6 +144,21 @@ export class TunnelServer extends EventEmitter {
                 basePath: isDuckDns ? "" : this.config.basePath,
                 wildcard: !isDuckDns,
             }];
+        }
+
+        // Initialize Dymo API client if configured
+        if (this.config.dymo?.apiKey && DymoAPI) {
+            try {
+                this.dymoClient = new DymoAPI({ apiKey: this.config.dymo.apiKey });
+                // Set cache TTL from config (default: 5 minutes)
+                if (this.config.dymo.cacheTTL) {
+                    this.dymoCacheTTL = this.config.dymo.cacheTTL * 1000;  // Convert seconds to ms
+                }
+                const cacheStatus = this.config.dymo.cacheResults !== false ? "enabled" : "disabled";
+                this.logger.info(`Dymo API fraud detection enabled (cache: ${cacheStatus}, TTL: ${this.dymoCacheTTL / 1000}s)`);
+            } catch (err: any) {
+                this.logger.warn(`Failed to initialize Dymo API: ${err.message}`);
+            }
         }
 
         // Create HTTP server initially (will be upgraded to HTTPS if needed)
@@ -226,6 +253,102 @@ export class TunnelServer extends EventEmitter {
     // Check if a domain is a DuckDNS domain (doesn't support wildcards)
     private isDuckDnsDomain(domain: string): boolean {
         return domain.toLowerCase().endsWith(".duckdns.org");
+    }
+
+    // Verify connection using Dymo API (checks IP and user agent for fraud)
+    // Uses caching to reduce API calls - same IP+UA combination is cached for TTL period
+    private async verifyWithDymo(ip: string, userAgent?: string): Promise<{ allowed: boolean; reason?: string }> {
+        if (!this.dymoClient || !this.config.dymo) {
+            return { allowed: true };
+        }
+
+        const dymoConfig = this.config.dymo;
+        const verifyIp = dymoConfig.verifyIp !== false;
+        const verifyUserAgent = dymoConfig.verifyUserAgent !== false;
+        const useCache = dymoConfig.cacheResults !== false;  // Cache enabled by default
+
+        // Normalize IP
+        const normalizedIp = ip && ip !== "unknown" ? ip.replace(/^::ffff:/, "") : "";
+
+        // Build cache key from IP + user agent
+        const cacheKey = `${normalizedIp}|${userAgent || ""}`;
+
+        // Check cache first (if enabled)
+        if (useCache) {
+            const cached = this.dymoCache.get(cacheKey);
+            if (cached && (Date.now() - cached.timestamp) < this.dymoCacheTTL) {
+                return { allowed: cached.allowed, reason: cached.reason };
+            }
+        }
+
+        // Build request data
+        const requestData: any = {};
+        if (verifyIp && normalizedIp) {
+            requestData.ip = normalizedIp;
+        }
+        if (verifyUserAgent && userAgent) {
+            requestData.userAgent = userAgent;
+        }
+
+        // Skip if nothing to verify
+        if (Object.keys(requestData).length === 0) {
+            return { allowed: true };
+        }
+
+        try {
+            const result = await this.dymoClient.isValidDataRaw(requestData);
+            let verificationResult: { allowed: boolean; reason?: string } = { allowed: true };
+
+            // Check IP fraud
+            if (result.ip) {
+                if (dymoConfig.blockOnFraud !== false && result.ip.fraud) {
+                    verificationResult = { allowed: false, reason: `IP ${normalizedIp} flagged as fraud by Dymo API` };
+                } else if (dymoConfig.blockProxies && result.ip.proxy) {
+                    verificationResult = { allowed: false, reason: `IP ${normalizedIp} detected as proxy/VPN` };
+                } else if (dymoConfig.blockHosting && result.ip.hosting) {
+                    verificationResult = { allowed: false, reason: `IP ${normalizedIp} detected as hosting/datacenter` };
+                }
+            }
+
+            // Check user agent fraud (only if IP check passed)
+            if (verificationResult.allowed && result.userAgent) {
+                if (dymoConfig.blockOnFraud !== false && result.userAgent.fraud) {
+                    verificationResult = { allowed: false, reason: "User agent flagged as fraud by Dymo API" };
+                } else if (dymoConfig.blockBots !== false && result.userAgent.bot) {
+                    verificationResult = { allowed: false, reason: "Bot user agent detected by Dymo API" };
+                }
+            }
+
+            // Store in cache (if enabled)
+            if (useCache) {
+                this.dymoCache.set(cacheKey, {
+                    allowed: verificationResult.allowed,
+                    reason: verificationResult.reason,
+                    timestamp: Date.now(),
+                });
+
+                // Clean old cache entries periodically (every 100 new entries)
+                if (this.dymoCache.size > 100 && this.dymoCache.size % 100 === 0) {
+                    this.cleanDymoCache();
+                }
+            }
+
+            return verificationResult;
+        } catch (err: any) {
+            // Log error but allow connection on API failure (fail-open)
+            this.logger.warn(`Dymo API verification failed: ${err.message}`);
+            return { allowed: true };
+        }
+    }
+
+    // Clean expired entries from Dymo cache
+    private cleanDymoCache(): void {
+        const now = Date.now();
+        for (const [key, value] of this.dymoCache.entries()) {
+            if (now - value.timestamp > this.dymoCacheTTL) {
+                this.dymoCache.delete(key);
+            }
+        }
     }
 
     private async setupHttps(): Promise<void> {
@@ -557,6 +680,9 @@ export class TunnelServer extends EventEmitter {
                         request.headers["x-forwarded-for"]?.toString().split(",")[0].trim() ||
                         "unknown";
 
+        // Get user agent from request
+        const userAgent = request.headers["user-agent"];
+
         // Check IP access control
         const ipCheck = this.isIpAllowed(clientIp);
         if (!ipCheck.allowed) {
@@ -565,6 +691,30 @@ export class TunnelServer extends EventEmitter {
             return;
         }
 
+        // Verify with Dymo API if configured (async check)
+        if (this.dymoClient) {
+            this.verifyWithDymo(clientIp, userAgent).then(dymoCheck => {
+                if (!dymoCheck.allowed) {
+                    this.logger.warn(`Connection denied by Dymo API for IP ${clientIp}: ${dymoCheck.reason}`);
+                    ws.close(1008, "Access denied"); // 1008 = Policy Violation
+                    return;
+                }
+                // Continue with connection setup after Dymo verification passes
+                this.setupClientConnection(ws, request, clientIp);
+            }).catch(err => {
+                // On error, allow connection (fail-open)
+                this.logger.warn(`Dymo verification error: ${err.message}`);
+                this.setupClientConnection(ws, request, clientIp);
+            });
+            return;
+        }
+
+        // No Dymo configured, proceed directly
+        this.setupClientConnection(ws, request, clientIp);
+    }
+
+    // Setup client connection after all verifications pass
+    private setupClientConnection(ws: WebSocket, request: IncomingMessage, clientIp: string): void {
         // Determine which domain the client connected to
         const host = request.headers.host || "";
         const hostWithoutPort = host.split(":")[0].toLowerCase();
@@ -985,6 +1135,22 @@ export class TunnelServer extends EventEmitter {
             hostWithoutPort === `${basePath}.${domain}`
         );
 
+        // Verify HTTP requests with Dymo API (check IP and user agent for fraud/bots)
+        if (this.dymoClient && !isDirectRequest) {
+            const clientIp = req.socket.remoteAddress ||
+                            req.headers["x-forwarded-for"]?.toString().split(",")[0].trim() ||
+                            "unknown";
+            const userAgent = req.headers["user-agent"];
+
+            const dymoCheck = await this.verifyWithDymo(clientIp, userAgent);
+            if (!dymoCheck.allowed) {
+                this.logger.warn(`HTTP request blocked by Dymo API: ${dymoCheck.reason}`);
+                res.writeHead(403, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: "Access denied", reason: dymoCheck.reason }));
+                return;
+            }
+        }
+
         if (isDirectRequest) {
             if (req.url?.startsWith("/api/")) {
                 this.handleApiRequest(req, res);
@@ -1068,6 +1234,22 @@ export class TunnelServer extends EventEmitter {
 
     // Handle HTTP requests for port-based tunnels (non-wildcard domains like DuckDNS)
     private async handlePortBasedHttpRequest(tunnel: Tunnel, req: IncomingMessage, res: ServerResponse): Promise<void> {
+        // Verify HTTP requests with Dymo API (check IP and user agent for fraud/bots)
+        if (this.dymoClient) {
+            const clientIp = req.socket.remoteAddress ||
+                            req.headers["x-forwarded-for"]?.toString().split(",")[0].trim() ||
+                            "unknown";
+            const userAgent = req.headers["user-agent"];
+
+            const dymoCheck = await this.verifyWithDymo(clientIp, userAgent);
+            if (!dymoCheck.allowed) {
+                this.logger.warn(`HTTP request blocked by Dymo API: ${dymoCheck.reason}`);
+                res.writeHead(403, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: "Access denied", reason: dymoCheck.reason }));
+                return;
+            }
+        }
+
         const requestId = generateId();
         const bodyChunks: Buffer[] = [];
 

@@ -48,6 +48,22 @@ interface OpenTunnelConfig {
         token?: string;
         tcpPortMin?: number;
         tcpPortMax?: number;
+        dymo?: {
+            apiKey: string;
+            verifyIp?: boolean;
+            verifyUserAgent?: boolean;
+            blockOnFraud?: boolean;
+            blockBots?: boolean;
+            blockProxies?: boolean;
+            blockHosting?: boolean;
+            cacheResults?: boolean;
+            cacheTTL?: number;
+        };
+        ipAccess?: {
+            mode: "all" | "allowlist" | "denylist";
+            allowList?: string[];
+            denyList?: string[];
+        };
     };
     tunnels?: TunnelConfigYaml[];  // Optional: not needed for server-only mode
 }
@@ -278,7 +294,7 @@ program
     .name("opentunnel")
     .alias("ot")
     .description("Expose local ports to the internet via custom domains or ngrok")
-    .version("1.0.21");
+    .version("1.0.23");
 
 // Helper function to build WebSocket URL from domain
 // User only provides base domain (e.g., fjrg2007.com), system handles the rest
@@ -326,8 +342,25 @@ program
         let serverDisplayName: string;
 
         if (options.localServer) {
-            if (!options.domain) {
-                console.log(chalk.red("Error: --local-server requires -s/--domain to specify your domain"));
+            // Get domain from options or default config
+            let domain = options.domain;
+            let basePath = options.basePath;
+
+            if (!domain) {
+                const defaultConfig = getDefaultDomain();
+                if (defaultConfig) {
+                    domain = defaultConfig.domain;
+                    if (!basePath && defaultConfig.basePath) {
+                        basePath = defaultConfig.basePath;
+                    }
+                }
+            }
+
+            if (!domain) {
+                console.log(chalk.red("Error: No domain specified and no default domain configured"));
+                console.log(chalk.gray("\nOptions:"));
+                console.log(chalk.cyan("  1. Specify domain: opentunnel quick 3000 --local-server -s example.com"));
+                console.log(chalk.cyan("  2. Set default:    opentunnel setdomain example.com"));
                 process.exit(1);
             }
 
@@ -339,8 +372,8 @@ program
             localServer = new TunnelServer({
                 port: serverPort,
                 host: "0.0.0.0",
-                domain: options.domain,
-                basePath: options.basePath || "op",
+                domain: domain,
+                basePath: basePath || "op",
                 tunnelPortRange: { min: 10000, max: 20000 },
                 selfSignedHttps: { enabled: true },
                 auth: options.token ? { required: true, tokens: [options.token] } : undefined,
@@ -356,7 +389,7 @@ program
 
             // Connect to local server
             serverUrl = `wss://localhost:${serverPort}/_tunnel`;
-            serverDisplayName = options.domain;
+            serverDisplayName = domain;
             options.insecure = true; // Local server uses self-signed cert
         } else {
             if (!options.domain) {
@@ -851,6 +884,12 @@ program
     .option("--ip-mode <mode>", "IP access mode: all, allowlist, denylist (default: all)")
     .option("--ip-allow <ips>", "Comma-separated IPs/CIDRs to allow (e.g., 192.168.1.0/24,10.0.0.1)")
     .option("--ip-deny <ips>", "Comma-separated IPs/CIDRs to deny")
+    .option("--dymo-api-key <key>", "Dymo API key for fraud detection (optional)")
+    .option("--no-dymo-block-bots", "Allow bot user agents (blocked by default when Dymo enabled)")
+    .option("--dymo-block-proxies", "Block proxy/VPN IPs")
+    .option("--dymo-block-hosting", "Block hosting/datacenter IPs")
+    .option("--no-dymo-cache", "Disable Dymo verification caching (sends API request for every HTTP request)")
+    .option("--dymo-cache-ttl <seconds>", "Dymo cache TTL in seconds (default: 300)")
     .option("-d, --detach", "Run server in background (detached mode)")
     .action(async (options) => {
         // Load config from opentunnel.yml if exists (with env variable substitution)
@@ -885,6 +924,12 @@ program
             ipMode: options.ipMode || fileConfig.ipAccess?.mode || "all",
             ipAllow: options.ipAllow || fileConfig.ipAccess?.allowList?.join(","),
             ipDeny: options.ipDeny || fileConfig.ipAccess?.denyList?.join(","),
+            dymoApiKey: options.dymoApiKey || fileConfig.dymo?.apiKey,
+            dymoBlockBots: options.dymoBlockBots ?? fileConfig.dymo?.blockBots ?? true,
+            dymoBlockProxies: options.dymoBlockProxies ?? fileConfig.dymo?.blockProxies ?? false,
+            dymoBlockHosting: options.dymoBlockHosting ?? fileConfig.dymo?.blockHosting ?? false,
+            dymoCache: options.dymoCache ?? fileConfig.dymo?.cacheResults ?? true,
+            dymoCacheTtl: options.dymoCacheTtl ? parseInt(options.dymoCacheTtl) : (fileConfig.dymo?.cacheTTL ?? 300),
             detach: options.detach,
         };
         // Detached mode - run in background
@@ -927,6 +972,10 @@ program
             if (mergedOptions.ipMode && mergedOptions.ipMode !== "all") args.push("--ip-mode", mergedOptions.ipMode);
             if (mergedOptions.ipAllow) args.push("--ip-allow", mergedOptions.ipAllow);
             if (mergedOptions.ipDeny) args.push("--ip-deny", mergedOptions.ipDeny);
+            if (mergedOptions.dymoApiKey) args.push("--dymo-api-key", mergedOptions.dymoApiKey);
+            if (mergedOptions.dymoBlockBots === false) args.push("--no-dymo-block-bots");
+            if (mergedOptions.dymoBlockProxies) args.push("--dymo-block-proxies");
+            if (mergedOptions.dymoBlockHosting) args.push("--dymo-block-hosting");
 
             const out = fsAsync.openSync(logFile, "a");
             const err = fsAsync.openSync(logFile, "a");
@@ -989,6 +1038,16 @@ program
             denyList: mergedOptions.ipDeny ? mergedOptions.ipDeny.split(",").map((ip: string) => ip.trim()) : undefined,
         } : undefined;
 
+        // Build Dymo API config (optional fraud detection)
+        const dymoConfig = mergedOptions.dymoApiKey ? {
+            apiKey: mergedOptions.dymoApiKey,
+            blockBots: mergedOptions.dymoBlockBots ?? true,
+            blockProxies: mergedOptions.dymoBlockProxies ?? false,
+            blockHosting: mergedOptions.dymoBlockHosting ?? false,
+            cacheResults: mergedOptions.dymoCache ?? true,
+            cacheTTL: mergedOptions.dymoCacheTtl ?? 300,
+        } : undefined;
+
         const server = new TunnelServer({
             port: parseInt(mergedOptions.port),
             publicPort: mergedOptions.publicPort ? parseInt(mergedOptions.publicPort) : undefined,
@@ -1003,6 +1062,7 @@ program
                 ? { required: true, tokens: mergedOptions.authTokens.split(",") }
                 : undefined,
             ipAccess: ipAccessConfig,
+            dymo: dymoConfig,
             https: httpsConfig,
             selfSignedHttps: selfSignedHttpsConfig,
             autoHttps: autoHttpsConfig,
@@ -1762,6 +1822,10 @@ program
                     max: tcpMax,
                 },
                 selfSignedHttps: useHttps ? { enabled: true } : undefined,
+                // In hybrid mode, auth is not needed for localhost. For remote clients, still require token.
+                auth: config.server?.token && !isHybridMode ? { required: true, tokens: [config.server.token] } : undefined,
+                dymo: config.server?.dymo,
+                ipAccess: config.server?.ipAccess as any,
             });
 
             try {

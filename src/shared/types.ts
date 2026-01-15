@@ -138,6 +138,19 @@ export interface IpAccessConfig {
     denyList?: string[];          // IPs or CIDR ranges to deny
 }
 
+// Dymo API configuration for fraud detection
+export interface DymoConfig {
+    apiKey: string;               // Dymo API key
+    verifyIp?: boolean;           // Verify client IP addresses (default: true)
+    verifyUserAgent?: boolean;    // Verify user agents (default: true)
+    blockOnFraud?: boolean;       // Block connections flagged as fraud (default: true)
+    blockBots?: boolean;          // Block bot user agents (default: true)
+    blockProxies?: boolean;       // Block proxy/VPN IPs (default: false)
+    blockHosting?: boolean;       // Block hosting/datacenter IPs (default: false)
+    cacheResults?: boolean;       // Cache verification results to reduce API calls (default: true)
+    cacheTTL?: number;            // Cache TTL in seconds (default: 300 = 5 minutes)
+}
+
 // Domain configuration for multi-domain support
 export interface DomainConfig {
     domain: string;
@@ -175,6 +188,8 @@ export interface ServerConfig {
     };
     // IP-based access control
     ipAccess?: IpAccessConfig;
+    // Dymo API fraud detection
+    dymo?: DymoConfig;
     duckdns?: {
         token: string;
         domain: string;

@@ -1,0 +1,170 @@
+# Commands Reference
+
+## Overview
+
+| Command | Description |
+|---------|-------------|
+| `opentunnel expl <port>` | Expose port via local server |
+| `opentunnel quick <port>` | Quick tunnel to a server |
+| `opentunnel http <port>` | HTTP tunnel |
+| `opentunnel tcp <port>` | TCP tunnel |
+| `opentunnel server` | Start tunnel server |
+| `opentunnel up` | Start from config file |
+| `opentunnel down` | Stop all tunnels |
+| `opentunnel restart` | Restart tunnels |
+| `opentunnel stop` | Stop server |
+| `opentunnel ps` | List running processes |
+| `opentunnel init` | Create config file |
+| `opentunnel setdomain` | Set default domain |
+| `opentunnel getdomain` | Show default domain |
+| `opentunnel cleardomain` | Remove default domain |
+
+## Expose Local (expl)
+
+Starts a local server and creates a tunnel automatically.
+
+```bash
+opentunnel expl <port> [options]
+
+Options:
+  -s, --domain <domain>       Server domain (uses default if not set)
+  -b, --base-path <path>      Server base path (default: op)
+  -n, --subdomain <name>      Request specific subdomain
+  -p, --protocol <proto>      http, https, or tcp (default: http)
+  -h, --host <host>           Local host (default: localhost)
+  -t, --token <token>         Authentication token
+  --insecure                  Skip SSL verification
+  --server-port <port>        Local server port (default: 443)
+```
+
+**Examples:**
+```bash
+opentunnel expl 3000
+opentunnel expl 3000 -s example.com
+opentunnel expl 3000 -n myapp
+```
+
+## Quick Command
+
+```bash
+opentunnel quick <port> [options]
+
+Required:
+  -s, --domain <domain>       Server domain
+
+Options:
+  -b, --base-path <path>      Server base path (default: op)
+  -n, --subdomain <name>      Request specific subdomain
+  -p, --protocol <proto>      http, https, or tcp (default: http)
+  -h, --host <host>           Local host (default: localhost)
+  -t, --token <token>         Authentication token
+  --insecure                  Skip SSL verification
+  --local-server              Start local server (hybrid mode)
+  --server-port <port>        Local server port (default: 443)
+```
+
+## HTTP/TCP Commands
+
+```bash
+opentunnel http <port> [options]
+opentunnel tcp <port> [options]
+
+Required:
+  -s, --domain <domain>       Server domain
+
+Options:
+  -b, --base-path <path>      Server base path (default: op)
+  -t, --token <token>         Authentication token
+  -n, --subdomain <name>      Custom subdomain
+  -h, --host <host>           Local host (default: localhost)
+  -r, --remote-port <port>    Remote TCP port (tcp only)
+  --insecure                  Skip SSL verification
+```
+
+## Server Command
+
+```bash
+opentunnel server [options]
+
+Required:
+  --domain <domain>           Base domain
+
+Optional:
+  -p, --port <port>           Server port (default: 443)
+  -b, --base-path <path>      Subdomain prefix (default: op)
+  --tcp-min <port>            Min TCP port (default: 10000)
+  --tcp-max <port>            Max TCP port (default: 20000)
+  -d, --detach                Run in background
+
+Authentication:
+  --auth-tokens <tokens>      Comma-separated tokens
+
+SSL/TLS:
+  --letsencrypt               Enable Let's Encrypt
+  --email <email>             Let's Encrypt email
+  --production                Production certificates
+  --cloudflare-token <token>  DNS-01 challenge
+
+IP Access Control:
+  --ip-mode <mode>            all, allowlist, or denylist
+  --ip-allow <ips>            IPs/CIDRs to allow
+  --ip-deny <ips>             IPs/CIDRs to deny
+
+Dymo API:
+  --dymo-api-key <key>        Enable fraud detection
+  --dymo-block-proxies        Block proxy/VPN IPs
+  --dymo-block-hosting        Block datacenter IPs
+  --no-dymo-block-bots        Allow bot user agents
+  --no-dymo-cache             Disable caching
+  --dymo-cache-ttl <seconds>  Cache TTL (default: 300)
+```
+
+## Domain Configuration
+
+```bash
+# Set default domain
+opentunnel setdomain example.com
+opentunnel setdomain example.com -b op
+
+# View configuration
+opentunnel getdomain
+
+# Remove default
+opentunnel cleardomain
+```
+
+Stored in `~/.opentunnel/config.json`:
+```json
+{
+  "defaultDomain": {
+    "domain": "example.com",
+    "basePath": "op"
+  }
+}
+```
+
+## Background Mode
+
+```bash
+# Start instances
+opentunnel up -d
+opentunnel up production -d
+opentunnel up staging -d
+
+# List running
+opentunnel ps
+
+# Restart
+opentunnel restart
+opentunnel restart production
+
+# Stop
+opentunnel down production
+opentunnel down
+```
+
+## See Also
+
+- [Client Guide](client-guide.md)
+- [Server Guide](server-guide.md)
+- [Configuration](configuration.md)
