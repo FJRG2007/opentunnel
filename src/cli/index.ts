@@ -4,12 +4,17 @@ import chalk from "chalk";
 import ora from "ora";
 import { TunnelClient } from "../client/TunnelClient";
 import { NgrokClient } from "../client/NgrokClient";
-import { TunnelProtocol } from "../shared/types";
+import { CloudflareTunnelClient } from "../client/CloudflareTunnelClient";
+import { TunnelProtocol, IpAccessConfig } from "../shared/types";
+import { CredentialsManager, resolveNgrokToken, resolveCloudflareCredentials } from "../shared/credentials";
 import { formatBytes, formatDuration } from "../shared/utils";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import * as fs from "fs";
 import * as path from "path";
 
+
+// Tunnel provider types
+type TunnelProvider = "opentunnel" | "ngrok" | "cloudflare";
 
 // Config file interfaces
 interface TunnelConfigYaml {
@@ -20,6 +25,15 @@ interface TunnelConfigYaml {
     subdomain?: string;
     remotePort?: number;
     autostart?: boolean;
+    // Provider-specific options (override global provider)
+    provider?: TunnelProvider;
+    // ngrok options
+    ngrokRegion?: "us" | "eu" | "ap" | "au" | "sa" | "jp" | "in";
+    ngrokToken?: string;
+    // cloudflare options
+    cfHostname?: string;
+    // Per-tunnel IP filtering (overrides global security.ipAccess)
+    ipAccess?: IpAccessConfig;
 }
 
 // Mode determines how OpenTunnel operates
@@ -38,6 +52,22 @@ interface DomainConfig {
 interface OpenTunnelConfig {
     name?: string;                 // Instance name (shown in ps, used for pid/log files)
     mode?: OpenTunnelMode;         // Explicitly set the mode (auto-detected if not set)
+    // Global tunnel provider (can be overridden per-tunnel)
+    provider?: TunnelProvider;     // "opentunnel" (default), "ngrok", or "cloudflare"
+    // ngrok global options
+    ngrok?: {
+        token?: string;
+        region?: "us" | "eu" | "ap" | "au" | "sa" | "jp" | "in";
+    };
+    // cloudflare global options
+    cloudflare?: {
+        hostname?: string;   // Custom hostname (requires named tunnel)
+        tunnelName?: string; // Default named tunnel to use
+    };
+    // Global security settings (can be overridden per-tunnel)
+    security?: {
+        ipAccess?: IpAccessConfig;
+    };
     server?: {
         domain?: string;   // Single domain (backward compatible)
         domains?: (string | DomainConfig)[];  // Multiple domains
@@ -210,7 +240,7 @@ function saveCLIConfig(config: CLIConfig): void {
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 }
 
-function getDefaultDomain(): { domain: string; basePath?: string } | null {
+function getDefaultDomain(): { domain: string; basePath?: string; } | null {
     const config = loadCLIConfig();
     return config.defaultDomain || null;
 }
@@ -293,13 +323,13 @@ const program = new Command();
 program
     .name("opentunnel")
     .alias("ot")
-    .description("Expose local ports to the internet via custom domains or ngrok")
-    .version("1.0.23");
+    .description("Expose local ports to the internet via custom domains, ngrok, or Cloudflare Tunnel")
+    .version("1.0.25");
 
 // Helper function to build WebSocket URL from domain
 // User only provides base domain (e.g., fjrg2007.com), system handles the rest
 // Note: --insecure flag only affects certificate verification, not the protocol
-function buildServerUrl(server: string, basePath?: string): { url: string; displayName: string } {
+function buildServerUrl(server: string, basePath?: string): { url: string; displayName: string; } {
     let hostname = server;
 
     // Remove protocol if provided
@@ -734,8 +764,30 @@ program
     .option("--insecure", "Skip SSL verification (for self-signed certs)")
     .option("--ngrok", "Use ngrok instead of OpenTunnel server")
     .option("--region <region>", "Ngrok region (us, eu, ap, au, sa, jp, in)", "us")
+    .option("--cloudflare, --cf", "Use Cloudflare Tunnel instead of OpenTunnel server")
+    .option("--cf-hostname <hostname>", "Custom hostname for Cloudflare Tunnel")
+    .option("--provider <provider>", "Tunnel provider (opentunnel, ngrok, cloudflare)")
     .action(async (port: string, options) => {
-        if (options.ngrok || options.domain === "ngrok") {
+        // Determine provider
+        const provider = options.provider?.toLowerCase() ||
+            (options.cloudflare || options.cf ? "cloudflare" : null) ||
+            (options.ngrok ? "ngrok" : null);
+
+        // Cloudflare Tunnel
+        if (provider === "cloudflare" || provider === "cf") {
+            await createCloudflareTunnel({
+                protocol: options.https ? "https" : "http",
+                localHost: options.host,
+                localPort: parseInt(port),
+                hostname: options.cfHostname,
+                tunnelName: options.subdomain,  // -n works as tunnel name for CF
+                noTlsVerify: options.insecure,
+            });
+            return;
+        }
+
+        // ngrok
+        if (provider === "ngrok") {
             await createNgrokTunnel({
                 protocol: options.https ? "https" : "http",
                 localHost: options.host,
@@ -747,8 +799,8 @@ program
             return;
         }
 
-        // If remote server domain provided, just connect to it
-        if (options.domain) {
+        // If remote server domain provided, connect to OpenTunnel server
+        if (options.domain && options.domain !== "cloudflare" && options.domain !== "ngrok") {
             const { url: serverUrl } = buildServerUrl(options.domain, options.basePath);
             await createTunnel({
                 protocol: options.https ? "https" : "http",
@@ -767,6 +819,8 @@ program
         console.log(chalk.gray("\nExamples:"));
         console.log(chalk.cyan("  opentunnel http 3000 -s example.com"));
         console.log(chalk.cyan("  opentunnel http 3000 --domain example.com -n myapp"));
+        console.log(chalk.cyan("  opentunnel http 3000 --cloudflare"));
+        console.log(chalk.cyan("  opentunnel http 3000 --ngrok"));
         process.exit(1);
     });
 
@@ -783,8 +837,35 @@ program
     .option("--insecure", "Skip SSL verification (for self-signed certs)")
     .option("--ngrok", "Use ngrok instead of OpenTunnel server")
     .option("--region <region>", "Ngrok region (us, eu, ap, au, sa, jp, in)", "us")
+    .option("--cloudflare, --cf", "Use Cloudflare Tunnel (TCP requires named tunnel)")
+    .option("--cf-hostname <hostname>", "Custom hostname for Cloudflare Tunnel")
+    .option("--provider <provider>", "Tunnel provider (opentunnel, ngrok, cloudflare)")
     .action(async (port: string, options) => {
-        if (options.ngrok || options.domain === "ngrok") {
+        // Determine provider
+        const provider = options.provider?.toLowerCase() ||
+            (options.cloudflare || options.cf ? "cloudflare" : null) ||
+            (options.ngrok ? "ngrok" : null);
+
+        // Cloudflare Tunnel - Note: TCP requires named tunnel
+        if (provider === "cloudflare" || provider === "cf") {
+            if (!options.subdomain) {
+                console.log(chalk.yellow("Note: Cloudflare TCP tunnels require a named tunnel."));
+                console.log(chalk.gray("Use -n <tunnel-name> to specify a named tunnel."));
+                console.log(chalk.gray("\nExample: opentunnel tcp 5432 --cf -n my-tunnel"));
+            }
+            await createCloudflareTunnel({
+                protocol: "tcp",
+                localHost: options.host,
+                localPort: parseInt(port),
+                hostname: options.cfHostname,
+                tunnelName: options.subdomain,
+                noTlsVerify: options.insecure,
+            });
+            return;
+        }
+
+        // ngrok
+        if (provider === "ngrok") {
             await createNgrokTunnel({
                 protocol: "tcp",
                 localHost: options.host,
@@ -796,8 +877,8 @@ program
             return;
         }
 
-        // If remote server domain provided, just connect to it
-        if (options.domain) {
+        // If remote server domain provided, connect to OpenTunnel server
+        if (options.domain && options.domain !== "cloudflare" && options.domain !== "ngrok") {
             const { url: serverUrl } = buildServerUrl(options.domain, options.basePath);
             await createTunnel({
                 protocol: "tcp",
@@ -816,6 +897,7 @@ program
         console.log(chalk.gray("\nExamples:"));
         console.log(chalk.cyan("  opentunnel tcp 5432 -s example.com"));
         console.log(chalk.cyan("  opentunnel tcp 5432 --domain example.com -r 15432"));
+        console.log(chalk.cyan("  opentunnel tcp 5432 --ngrok"));
         process.exit(1);
     });
 
@@ -831,6 +913,7 @@ program
     .option("--domain <domain>", "Server domain (e.g., domain.com)")
     .option("--insecure", "Skip SSL certificate verification (for self-signed certs)")
     .option("--ngrok", "Use ngrok instead of OpenTunnel server")
+    .option("--cloudflare, --cf", "Use Cloudflare Tunnel instead of OpenTunnel server")
     .action(async (port: string, options) => {
         const serverUrl = options.server || (options.domain
             ? `wss://${options.domain}/_tunnel`
@@ -840,6 +923,19 @@ program
             await runTunnelInBackground("expose", port, { ...options, server: serverUrl });
             return;
         }
+
+        // Cloudflare Tunnel
+        if (options.cloudflare || options.cf || options.server === "cloudflare") {
+            await createCloudflareTunnel({
+                protocol: options.protocol as TunnelProtocol,
+                localHost: "localhost",
+                localPort: parseInt(port),
+                noTlsVerify: options.insecure,
+            });
+            return;
+        }
+
+        // ngrok
         if (options.ngrok || options.server === "ngrok") {
             await createNgrokTunnel({
                 protocol: options.protocol as TunnelProtocol,
@@ -848,17 +944,19 @@ program
                 subdomain: options.subdomain,
                 authtoken: options.token
             });
-        } else {
-            await createTunnel({
-                protocol: options.protocol as TunnelProtocol,
-                localHost: "localhost",
-                localPort: parseInt(port),
-                subdomain: options.subdomain,
-                serverUrl,
-                token: options.token,
-                insecure: options.insecure
-            });
+            return;
         }
+
+        // OpenTunnel server
+        await createTunnel({
+            protocol: options.protocol as TunnelProtocol,
+            localHost: "localhost",
+            localPort: parseInt(port),
+            subdomain: options.subdomain,
+            serverUrl,
+            token: options.token,
+            insecure: options.insecure
+        });
     });
 
 // Server command
@@ -1791,7 +1889,7 @@ program
             console.log(chalk.cyan(`Starting ${tunnelsToStart.length} tunnel(s)...\n`));
 
             try {
-                await startTunnelsFromConfig(tunnelsToStart, serverUrl, config.server?.token, true);
+                await startTunnelsFromConfig(tunnelsToStart, serverUrl, config.server?.token, true, config);
 
                 console.log(chalk.gray("\nPress Ctrl+C to stop"));
 
@@ -1852,7 +1950,7 @@ program
                     // Small delay to ensure server is fully ready
                     await new Promise(resolve => setTimeout(resolve, 500));
 
-                    await startTunnelsFromConfig(tunnelsToStart, serverUrl, config.server?.token, true);
+                    await startTunnelsFromConfig(tunnelsToStart, serverUrl, config.server?.token, true, config);
                 } else if (isServerMode) {
                     console.log(chalk.gray("\nServer ready. Waiting for connections..."));
                 }
@@ -2564,96 +2662,202 @@ async function startTunnelsFromConfig(
     tunnels: TunnelConfigYaml[],
     serverUrl: string,
     token?: string,
-    insecure?: boolean
+    insecure?: boolean,
+    globalConfig?: OpenTunnelConfig
 ): Promise<void> {
-    const spinner = ora("Connecting to server...").start();
+    // Determine global provider
+    const globalProvider = globalConfig?.provider || "opentunnel";
 
-    const client = new TunnelClient({
-        serverUrl,
-        token,
-        reconnect: true,
-        silent: true,
-        rejectUnauthorized: !insecure,
-    });
-
-    try {
-        await client.connect();
-        spinner.succeed("Connected to server");
-
-        const activeTunnels: { name: string; tunnelId: string; publicUrl: string }[] = [];
-
-        for (const tunnel of tunnels) {
-            const tunnelSpinner = ora(`Creating tunnel: ${tunnel.name}...`).start();
-
-            try {
-                const { tunnelId, publicUrl } = await client.createTunnel({
-                    protocol: tunnel.protocol as TunnelProtocol,
-                    localHost: tunnel.host || "localhost",
-                    localPort: tunnel.port,
-                    subdomain: tunnel.subdomain,
-                    remotePort: tunnel.remotePort,
-                });
-
-                activeTunnels.push({ name: tunnel.name, tunnelId, publicUrl });
-                tunnelSpinner.succeed(`${tunnel.name}: ${publicUrl}`);
-            } catch (err: any) {
-                tunnelSpinner.fail(`${tunnel.name}: ${err.message}`);
-            }
+    // Group tunnels by provider
+    const tunnelsByProvider = new Map<TunnelProvider, TunnelConfigYaml[]>();
+    for (const tunnel of tunnels) {
+        const provider = tunnel.provider || globalProvider;
+        if (!tunnelsByProvider.has(provider)) {
+            tunnelsByProvider.set(provider, []);
         }
+        tunnelsByProvider.get(provider)!.push(tunnel);
+    }
 
-        if (activeTunnels.length === 0) {
-            console.log(chalk.red("\nNo tunnels created"));
-            process.exit(1);
-        }
+    const activeTunnels: { name: string; tunnelId: string; publicUrl: string; provider: TunnelProvider; client: any }[] = [];
+    const clients: { provider: TunnelProvider; client: any }[] = [];
 
-        console.log(chalk.cyan("\n─────────────────────────────────────────"));
-        console.log(chalk.green(`  ${activeTunnels.length} tunnel(s) active`));
-        console.log(chalk.cyan("─────────────────────────────────────────\n"));
-
-        for (const t of activeTunnels) {
-            console.log(`  ${chalk.white(t.name.padEnd(15))} ${chalk.green(t.publicUrl)}`);
-        }
-
-        console.log(chalk.gray("\n  Press Ctrl+C to stop all tunnels\n"));
-
-        // Keep alive with uptime counter
-        const startTime = Date.now();
-        const statsInterval = setInterval(() => {
-            const uptime = formatDuration(Date.now() - startTime);
-            process.stdout.write(`\r  ${chalk.gray(`Uptime: ${uptime}`)}`);
-        }, 1000);
-
-        // Handle exit
-        const cleanup = async () => {
-            clearInterval(statsInterval);
-            console.log("\n");
-            const closeSpinner = ora("Closing tunnels...").start();
-
-            for (const t of activeTunnels) {
-                await client.closeTunnel(t.tunnelId);
-            }
-
-            await client.disconnect();
-            closeSpinner.succeed("All tunnels closed");
-            process.exit(0);
-        };
-
-        process.on("SIGINT", cleanup);
-        process.on("SIGTERM", cleanup);
-
-        // Handle reconnection
-        client.on("disconnected", () => {
-            console.log(chalk.yellow("\n  Disconnected, reconnecting..."));
+    // Process OpenTunnel tunnels
+    const opentunnelTunnels = tunnelsByProvider.get("opentunnel") || [];
+    if (opentunnelTunnels.length > 0) {
+        const spinner = ora("Connecting to OpenTunnel server...").start();
+        const client = new TunnelClient({
+            serverUrl,
+            token,
+            reconnect: true,
+            silent: true,
+            rejectUnauthorized: !insecure,
         });
 
-        client.on("connected", () => {
-            console.log(chalk.green("  Reconnected!"));
+        try {
+            await client.connect();
+            spinner.succeed("Connected to OpenTunnel server");
+            clients.push({ provider: "opentunnel", client });
+
+            for (const tunnel of opentunnelTunnels) {
+                const tunnelSpinner = ora(`Creating tunnel: ${tunnel.name}...`).start();
+                try {
+                    const { tunnelId, publicUrl } = await client.createTunnel({
+                        protocol: tunnel.protocol as TunnelProtocol,
+                        localHost: tunnel.host || "localhost",
+                        localPort: tunnel.port,
+                        subdomain: tunnel.subdomain,
+                        remotePort: tunnel.remotePort,
+                    });
+                    activeTunnels.push({ name: tunnel.name, tunnelId, publicUrl, provider: "opentunnel", client });
+                    tunnelSpinner.succeed(`${tunnel.name}: ${publicUrl}`);
+                } catch (err: any) {
+                    tunnelSpinner.fail(`${tunnel.name}: ${err.message}`);
+                }
+            }
+
+            // Handle reconnection events
+            client.on("disconnected", () => {
+                console.log(chalk.yellow("\n  OpenTunnel disconnected, reconnecting..."));
+            });
+            client.on("connected", () => {
+                console.log(chalk.green("  OpenTunnel reconnected!"));
+            });
+        } catch (err: any) {
+            spinner.fail(`OpenTunnel connection failed: ${err.message}`);
+        }
+    }
+
+    // Process ngrok tunnels (one at a time, ngrok limitation)
+    const ngrokTunnels = tunnelsByProvider.get("ngrok") || [];
+    for (const tunnel of ngrokTunnels) {
+        const spinner = ora(`Creating ngrok tunnel: ${tunnel.name}...`).start();
+        const ngrokToken = tunnel.ngrokToken || globalConfig?.ngrok?.token;
+        const ngrokRegion = tunnel.ngrokRegion || globalConfig?.ngrok?.region || "us";
+
+        // Merge IP access config: tunnel-specific > global security > none
+        const { IpFilter } = await import("../shared/ip-filter");
+        const ipAccess = IpFilter.mergeConfigs(
+            globalConfig?.security?.ipAccess,
+            tunnel.ipAccess
+        );
+
+        const client = new NgrokClient({
+            authtoken: ngrokToken,
+            region: ngrokRegion,
+            ipAccess,
         });
 
-    } catch (err: any) {
-        spinner.fail(`Failed: ${err.message}`);
+        try {
+            await client.connect();
+            const { tunnelId, publicUrl } = await client.createTunnel({
+                protocol: tunnel.protocol as TunnelProtocol,
+                localHost: tunnel.host || "localhost",
+                localPort: tunnel.port,
+                subdomain: tunnel.subdomain,
+                remotePort: tunnel.remotePort,
+            });
+            activeTunnels.push({ name: tunnel.name, tunnelId, publicUrl, provider: "ngrok", client });
+            clients.push({ provider: "ngrok", client });
+            spinner.succeed(`${tunnel.name}: ${publicUrl} (ngrok)`);
+        } catch (err: any) {
+            spinner.fail(`${tunnel.name}: ${err.message}`);
+            console.log(chalk.yellow("  Make sure ngrok is installed: https://ngrok.com/download"));
+        }
+    }
+
+    // Process Cloudflare tunnels (one at a time)
+    const cloudflareTunnels = tunnelsByProvider.get("cloudflare") || [];
+    for (const tunnel of cloudflareTunnels) {
+        const spinner = ora(`Creating Cloudflare tunnel: ${tunnel.name}...`).start();
+        const cfHostname = tunnel.cfHostname || globalConfig?.cloudflare?.hostname;
+        // For Cloudflare: subdomain = tunnel name
+        const cfTunnelName = tunnel.subdomain || globalConfig?.cloudflare?.tunnelName;
+
+        // Merge IP access config: tunnel-specific > global security > none
+        const { IpFilter } = await import("../shared/ip-filter");
+        const ipAccess = IpFilter.mergeConfigs(
+            globalConfig?.security?.ipAccess,
+            tunnel.ipAccess
+        );
+
+        const client = new CloudflareTunnelClient({
+            hostname: cfHostname,
+            tunnelName: cfTunnelName,
+            protocol: tunnel.protocol === "https" ? "https" : "http",
+            ipAccess,
+        });
+
+        try {
+            await client.connect();
+            const { tunnelId, publicUrl } = await client.createTunnel({
+                protocol: tunnel.protocol as TunnelProtocol,
+                localHost: tunnel.host || "localhost",
+                localPort: tunnel.port,
+            });
+            activeTunnels.push({ name: tunnel.name, tunnelId, publicUrl, provider: "cloudflare", client });
+            clients.push({ provider: "cloudflare", client });
+            const tunnelMode = cfTunnelName ? ` [${cfTunnelName}]` : "";
+            spinner.succeed(`${tunnel.name}: ${publicUrl}${tunnelMode} (cloudflare)`);
+        } catch (err: any) {
+            spinner.fail(`${tunnel.name}: ${err.message}`);
+            console.log(chalk.yellow("  cloudflared installs automatically. Check internet connection or try: npm rebuild cloudflared"));
+        }
+    }
+
+    if (activeTunnels.length === 0) {
+        console.log(chalk.red("\nNo tunnels created"));
         process.exit(1);
     }
+
+    console.log(chalk.cyan("\n─────────────────────────────────────────"));
+    console.log(chalk.green(`  ${activeTunnels.length} tunnel(s) active`));
+    console.log(chalk.cyan("─────────────────────────────────────────\n"));
+
+    for (const t of activeTunnels) {
+        const providerTag = t.provider !== "opentunnel" ? chalk.gray(` (${t.provider})`) : "";
+        console.log(`  ${chalk.white(t.name.padEnd(15))} ${chalk.green(t.publicUrl)}${providerTag}`);
+    }
+
+    console.log(chalk.gray("\n  Press Ctrl+C to stop all tunnels\n"));
+
+    // Keep alive with uptime counter
+    const startTime = Date.now();
+    const statsInterval = setInterval(() => {
+        const uptime = formatDuration(Date.now() - startTime);
+        process.stdout.write(`\r  ${chalk.gray(`Uptime: ${uptime}`)}`);
+    }, 1000);
+
+    // Handle exit
+    const cleanup = async () => {
+        clearInterval(statsInterval);
+        console.log("\n");
+        const closeSpinner = ora("Closing tunnels...").start();
+
+        for (const t of activeTunnels) {
+            try {
+                await t.client.closeTunnel(t.tunnelId);
+            } catch {
+                // Ignore errors during cleanup
+            }
+        }
+
+        for (const { client } of clients) {
+            try {
+                await client.disconnect();
+            } catch {
+                // Ignore errors during cleanup
+            }
+        }
+
+        closeSpinner.succeed("All tunnels closed");
+        process.exit(0);
+    };
+
+    process.on("SIGINT", cleanup);
+    process.on("SIGTERM", cleanup);
+
+    // Keep process alive
+    await new Promise(() => {});
 };
 
 async function runTunnelInBackground(command: string, port: string, options: any): Promise<void> {
@@ -2751,6 +2955,15 @@ interface NgrokOptions {
     remotePort?: number;
     authtoken?: string;
     region?: string;
+}
+
+interface CloudflareOptions {
+    protocol: TunnelProtocol;
+    localHost: string;
+    localPort: number;
+    hostname?: string;
+    tunnelName?: string;  // Named tunnel (from -n flag)
+    noTlsVerify?: boolean;
 }
 
 async function createTunnel(options: TunnelOptions): Promise<void> {
@@ -2882,6 +3095,70 @@ async function createNgrokTunnel(options: NgrokOptions): Promise<void> {
     }
 };
 
+async function createCloudflareTunnel(options: CloudflareOptions): Promise<void> {
+    const tunnelType = options.tunnelName ? `named tunnel '${options.tunnelName}'` : "quick tunnel";
+    const spinner = ora(`Starting Cloudflare ${tunnelType}...`).start();
+
+    const client = new CloudflareTunnelClient({
+        hostname: options.hostname,
+        tunnelName: options.tunnelName,
+        noTlsVerify: options.noTlsVerify,
+        protocol: options.protocol === "https" ? "https" : "http",
+    });
+
+    try {
+        await client.connect();
+        spinner.text = "Creating tunnel...";
+
+        const { tunnelId, publicUrl } = await client.createTunnel({
+            protocol: options.protocol,
+            localHost: options.localHost,
+            localPort: options.localPort,
+        });
+
+        spinner.succeed("Tunnel established!");
+
+        const providerInfo = options.tunnelName
+            ? `Cloudflare [${options.tunnelName}]`
+            : "Cloudflare";
+
+        printTunnelInfo({
+            status: "Online",
+            protocol: options.protocol,
+            localHost: options.localHost,
+            localPort: options.localPort,
+            publicUrl,
+            provider: providerInfo,
+        });
+
+        // Keep alive
+        const startTime = Date.now();
+        const statsInterval = setInterval(() => {
+            const uptime = formatDuration(Date.now() - startTime);
+            process.stdout.write(`\r  ${chalk.gray(`Uptime: ${uptime}`)}`);
+        }, 1000);
+
+        // Handle exit
+        const cleanup = async () => {
+            clearInterval(statsInterval);
+            console.log("\n");
+            spinner.start("Closing tunnel...");
+            await client.closeTunnel(tunnelId);
+            await client.disconnect();
+            spinner.succeed("Tunnel closed");
+            process.exit(0);
+        };
+
+        process.on("SIGINT", cleanup);
+        process.on("SIGTERM", cleanup);
+
+    } catch (err: any) {
+        spinner.fail(`Failed: ${err.message}`);
+        console.log(chalk.yellow("\ncloudflared installs automatically. Check your internet connection or try: npm rebuild cloudflared"));
+        process.exit(1);
+    }
+};
+
 function printTunnelInfo(info: {
     status: string;
     protocol: TunnelProtocol;
@@ -2902,5 +3179,422 @@ function printTunnelInfo(info: {
     console.log(chalk.gray("  Press Ctrl+C to close the tunnel"));
     console.log("");
 };
+
+// ============================================================================
+// Unified Provider Commands
+// ============================================================================
+
+// Login command - unified for all providers
+program
+    .command("login <provider>")
+    .description("Authenticate with a provider (cloudflare, ngrok)")
+    .option("-t, --token <token>", "Authentication token (required for ngrok)")
+    .action(async (provider: string, options) => {
+        const credManager = new CredentialsManager();
+        const normalizedProvider = provider.toLowerCase();
+
+        if (normalizedProvider === "cloudflare" || normalizedProvider === "cf") {
+            const spinner = ora("Running cloudflared login...").start();
+
+            try {
+                const binPath = await CloudflareTunnelClient.ensureInstalled();
+                const { spawn } = await import("child_process");
+
+                spinner.stop();
+                console.log(chalk.cyan("\n  Opening browser for Cloudflare authentication...\n"));
+
+                const proc = spawn(binPath, ["login"], {
+                    stdio: "inherit",
+                    shell: process.platform === "win32",
+                });
+
+                await new Promise<void>((resolve, reject) => {
+                    proc.on("close", (code) => {
+                        if (code === 0) {
+                            const os = require("os");
+                            const defaultCertPath = path.join(os.homedir(), ".cloudflared", "cert.pem");
+                            credManager.setCloudflare({ certPath: defaultCertPath });
+                            console.log(chalk.green("\n  Cloudflare credentials saved"));
+                            console.log(chalk.gray(`  Cert path: ${defaultCertPath}`));
+                            resolve();
+                        } else {
+                            reject(new Error(`cloudflared login exited with code ${code}`));
+                        }
+                    });
+                    proc.on("error", reject);
+                });
+            } catch (err: any) {
+                spinner.fail(`Login failed: ${err.message}`);
+                process.exit(1);
+            }
+
+        } else if (normalizedProvider === "ngrok") {
+            if (!options.token) {
+                console.log(chalk.red("Error: ngrok requires --token <token>"));
+                console.log(chalk.gray("\nGet your token from: https://dashboard.ngrok.com/get-started/your-authtoken"));
+                console.log(chalk.cyan("\nUsage: opentunnel login ngrok --token <your-token>"));
+                process.exit(1);
+            }
+
+            credManager.setNgrok({ token: options.token });
+            console.log(chalk.green("\n  ngrok credentials saved"));
+            console.log(chalk.gray(`  Token: ${options.token.slice(0, 8)}...`));
+            console.log(chalk.gray(`  Stored at: ${CredentialsManager.getCredentialsFile()}\n`));
+
+        } else {
+            console.log(chalk.red(`Unknown provider: ${provider}`));
+            console.log(chalk.gray("\nSupported providers: cloudflare (cf), ngrok"));
+            process.exit(1);
+        }
+    });
+
+// Logout command - unified for all providers
+program
+    .command("logout <provider>")
+    .description("Remove stored credentials for a provider")
+    .action(async (provider: string) => {
+        const credManager = new CredentialsManager();
+        const normalizedProvider = provider.toLowerCase();
+
+        if (normalizedProvider === "cloudflare" || normalizedProvider === "cf") {
+            const removed = credManager.removeProvider("cloudflare");
+            if (removed) {
+                console.log(chalk.green("\n  Cloudflare credentials removed\n"));
+            } else {
+                console.log(chalk.yellow("\n  No Cloudflare credentials found\n"));
+            }
+        } else if (normalizedProvider === "ngrok") {
+            const removed = credManager.removeProvider("ngrok");
+            if (removed) {
+                console.log(chalk.green("\n  ngrok credentials removed\n"));
+            } else {
+                console.log(chalk.yellow("\n  No ngrok credentials found\n"));
+            }
+        } else {
+            console.log(chalk.red(`Unknown provider: ${provider}`));
+            console.log(chalk.gray("\nSupported providers: cloudflare (cf), ngrok"));
+            process.exit(1);
+        }
+    });
+
+// Create tunnel command (for named tunnels)
+program
+    .command("create <name>")
+    .description("Create a named tunnel")
+    .option("--cf, --cloudflare", "Create Cloudflare named tunnel")
+    .option("--provider <provider>", "Provider (cloudflare)")
+    .action(async (name: string, options) => {
+        const provider = options.provider?.toLowerCase() ||
+            (options.cloudflare || options.cf ? "cloudflare" : null);
+
+        if (!provider) {
+            console.log(chalk.red("Error: Provider required"));
+            console.log(chalk.gray("\nUsage: opentunnel create <name> --cf"));
+            console.log(chalk.gray("       opentunnel create <name> --provider cloudflare"));
+            process.exit(1);
+        }
+
+        if (provider === "cloudflare" || provider === "cf") {
+            const spinner = ora(`Creating Cloudflare tunnel '${name}'...`).start();
+
+            try {
+                const binPath = await CloudflareTunnelClient.ensureInstalled();
+                const { spawn } = await import("child_process");
+
+                const proc = spawn(binPath, ["tunnel", "create", name], {
+                    stdio: ["ignore", "pipe", "pipe"],
+                    shell: process.platform === "win32",
+                });
+
+                let output = "";
+                let errorOutput = "";
+
+                proc.stdout?.on("data", (data) => { output += data.toString(); });
+                proc.stderr?.on("data", (data) => { errorOutput += data.toString(); });
+
+                await new Promise<void>((resolve, reject) => {
+                    proc.on("close", (code) => {
+                        if (code === 0) {
+                            spinner.succeed(`Tunnel '${name}' created`);
+                            if (output) console.log(chalk.gray(output.trim()));
+                            resolve();
+                        } else {
+                            reject(new Error(errorOutput || `Exit code ${code}`));
+                        }
+                    });
+                    proc.on("error", reject);
+                });
+            } catch (err: any) {
+                spinner.fail(`Failed to create tunnel: ${err.message}`);
+                if (err.message.includes("login")) {
+                    console.log(chalk.yellow("\nRun 'opentunnel login cloudflare' first"));
+                }
+                process.exit(1);
+            }
+        } else {
+            console.log(chalk.red(`Provider '${provider}' doesn't support named tunnels`));
+            process.exit(1);
+        }
+    });
+
+// Delete tunnel command
+program
+    .command("delete <name>")
+    .description("Delete a named tunnel")
+    .option("--cf, --cloudflare", "Delete Cloudflare named tunnel")
+    .option("--provider <provider>", "Provider (cloudflare)")
+    .option("-f, --force", "Force deletion without confirmation")
+    .action(async (name: string, options) => {
+        const provider = options.provider?.toLowerCase() ||
+            (options.cloudflare || options.cf ? "cloudflare" : null);
+
+        if (!provider) {
+            console.log(chalk.red("Error: Provider required"));
+            console.log(chalk.gray("\nUsage: opentunnel delete <name> --cf"));
+            process.exit(1);
+        }
+
+        if (provider === "cloudflare" || provider === "cf") {
+            if (!options.force) {
+                console.log(chalk.yellow(`\n  This will delete tunnel '${name}' permanently.`));
+                console.log(chalk.gray("  Use --force to skip this confirmation.\n"));
+
+                const readline = await import("readline");
+                const rl = readline.createInterface({
+                    input: process.stdin,
+                    output: process.stdout,
+                });
+
+                const answer = await new Promise<string>((resolve) => {
+                    rl.question("  Type the tunnel name to confirm: ", resolve);
+                });
+                rl.close();
+
+                if (answer !== name) {
+                    console.log(chalk.red("\n  Cancelled: name didn't match\n"));
+                    return;
+                }
+            }
+
+            const spinner = ora(`Deleting tunnel '${name}'...`).start();
+
+            try {
+                const binPath = await CloudflareTunnelClient.ensureInstalled();
+                const { spawn } = await import("child_process");
+
+                const proc = spawn(binPath, ["tunnel", "delete", name], {
+                    stdio: ["ignore", "pipe", "pipe"],
+                    shell: process.platform === "win32",
+                });
+
+                let errorOutput = "";
+                proc.stderr?.on("data", (data) => { errorOutput += data.toString(); });
+
+                await new Promise<void>((resolve, reject) => {
+                    proc.on("close", (code) => {
+                        if (code === 0) {
+                            spinner.succeed(`Tunnel '${name}' deleted`);
+                            resolve();
+                        } else {
+                            reject(new Error(errorOutput || `Exit code ${code}`));
+                        }
+                    });
+                    proc.on("error", reject);
+                });
+            } catch (err: any) {
+                spinner.fail(`Failed to delete tunnel: ${err.message}`);
+                process.exit(1);
+            }
+        }
+    });
+
+// Route DNS command (Cloudflare specific)
+program
+    .command("route <name> <hostname>")
+    .description("Route a hostname to a tunnel (Cloudflare DNS)")
+    .option("--cf, --cloudflare", "Route via Cloudflare")
+    .option("--provider <provider>", "Provider (cloudflare)")
+    .action(async (name: string, hostname: string, options) => {
+        const provider = options.provider?.toLowerCase() ||
+            (options.cloudflare || options.cf ? "cloudflare" : "cloudflare"); // Default to cloudflare
+
+        if (provider === "cloudflare" || provider === "cf") {
+            const spinner = ora(`Routing ${hostname} to tunnel '${name}'...`).start();
+
+            try {
+                const binPath = await CloudflareTunnelClient.ensureInstalled();
+                const { spawn } = await import("child_process");
+
+                const proc = spawn(binPath, ["tunnel", "route", "dns", name, hostname], {
+                    stdio: ["ignore", "pipe", "pipe"],
+                    shell: process.platform === "win32",
+                });
+
+                let output = "";
+                let errorOutput = "";
+
+                proc.stdout?.on("data", (data) => { output += data.toString(); });
+                proc.stderr?.on("data", (data) => { errorOutput += data.toString(); });
+
+                await new Promise<void>((resolve, reject) => {
+                    proc.on("close", (code) => {
+                        if (code === 0) {
+                            spinner.succeed(`DNS route created: ${hostname} -> ${name}`);
+                            if (output) console.log(chalk.gray(output.trim()));
+                            resolve();
+                        } else {
+                            reject(new Error(errorOutput || `Exit code ${code}`));
+                        }
+                    });
+                    proc.on("error", reject);
+                });
+            } catch (err: any) {
+                spinner.fail(`Failed to create route: ${err.message}`);
+                process.exit(1);
+            }
+        }
+    });
+
+// List tunnels command - extend existing list command
+program
+    .command("tunnels")
+    .description("List named tunnels")
+    .option("--cf, --cloudflare", "List Cloudflare tunnels")
+    .option("--provider <provider>", "Provider (cloudflare)")
+    .action(async (options) => {
+        const provider = options.provider?.toLowerCase() ||
+            (options.cloudflare || options.cf ? "cloudflare" : null);
+
+        if (!provider) {
+            console.log(chalk.red("Error: Provider required"));
+            console.log(chalk.gray("\nUsage: opentunnel tunnels --cf"));
+            process.exit(1);
+        }
+
+        if (provider === "cloudflare" || provider === "cf") {
+            const spinner = ora("Listing Cloudflare tunnels...").start();
+
+            try {
+                const binPath = await CloudflareTunnelClient.ensureInstalled();
+                const { spawn } = await import("child_process");
+
+                const proc = spawn(binPath, ["tunnel", "list"], {
+                    stdio: ["ignore", "pipe", "pipe"],
+                    shell: process.platform === "win32",
+                });
+
+                let output = "";
+                let errorOutput = "";
+
+                proc.stdout?.on("data", (data) => { output += data.toString(); });
+                proc.stderr?.on("data", (data) => { errorOutput += data.toString(); });
+
+                await new Promise<void>((resolve, reject) => {
+                    proc.on("close", (code) => {
+                        if (code === 0) {
+                            spinner.stop();
+                            console.log(chalk.cyan("\n  Cloudflare Tunnels"));
+                            console.log(chalk.gray("  " + "─".repeat(60)));
+                            if (output.trim()) {
+                                console.log(output);
+                            } else {
+                                console.log(chalk.yellow("  No tunnels found"));
+                                console.log(chalk.gray("\n  Create one with: opentunnel create <name> --cf"));
+                            }
+                            resolve();
+                        } else {
+                            reject(new Error(errorOutput || `Exit code ${code}`));
+                        }
+                    });
+                    proc.on("error", reject);
+                });
+            } catch (err: any) {
+                spinner.fail(`Failed to list tunnels: ${err.message}`);
+                if (err.message.includes("login")) {
+                    console.log(chalk.yellow("\nRun 'opentunnel login cloudflare' first"));
+                }
+                process.exit(1);
+            }
+        }
+    });
+
+// ============================================================================
+// Config Commands
+// ============================================================================
+
+const configCommand = program
+    .command("config")
+    .description("Manage OpenTunnel configuration");
+
+configCommand
+    .command("set <key> <value>")
+    .description("Set a configuration value (e.g., ngrok.token, cloudflare.accountId)")
+    .action(async (key: string, value: string) => {
+        const credManager = new CredentialsManager();
+
+        const validKeys = [
+            "ngrok.token",
+            "cloudflare.accountId",
+            "cloudflare.tunnelToken",
+            "cloudflare.certPath",
+        ];
+
+        if (!validKeys.includes(key)) {
+            console.log(chalk.red(`Invalid key: ${key}`));
+            console.log(chalk.gray("\nValid keys:"));
+            for (const k of validKeys) {
+                console.log(chalk.cyan(`  ${k}`));
+            }
+            process.exit(1);
+        }
+
+        credManager.set(key, value);
+        console.log(chalk.green(`\n  ${key} = ${value.slice(0, 20)}${value.length > 20 ? "..." : ""}\n`));
+    });
+
+configCommand
+    .command("get <key>")
+    .description("Get a configuration value")
+    .action(async (key: string) => {
+        const credManager = new CredentialsManager();
+        const value = credManager.get(key);
+
+        if (value) {
+            // Mask sensitive values
+            const masked = key.includes("token") || key.includes("Token")
+                ? value.slice(0, 8) + "..." + value.slice(-4)
+                : value;
+            console.log(chalk.cyan(`\n  ${key} = ${masked}\n`));
+        } else {
+            console.log(chalk.yellow(`\n  ${key} is not set\n`));
+        }
+    });
+
+configCommand
+    .command("list")
+    .description("List all stored configuration")
+    .action(async () => {
+        const credManager = new CredentialsManager();
+        const keys = credManager.listKeys();
+
+        console.log(chalk.cyan("\n  Stored Configuration"));
+        console.log(chalk.gray("  " + "─".repeat(40)));
+
+        if (keys.length === 0) {
+            console.log(chalk.yellow("  No configuration stored"));
+            console.log(chalk.gray("\n  Use 'opentunnel login' or 'opentunnel config set' to add credentials"));
+        } else {
+            for (const key of keys) {
+                const value = credManager.get(key);
+                const masked = (key.includes("token") || key.includes("Token")) && value
+                    ? value.slice(0, 8) + "..." + value.slice(-4)
+                    : value;
+                console.log(`  ${chalk.white(key.padEnd(25))} ${chalk.gray(masked || "")}`);
+            }
+        }
+
+        console.log(chalk.gray("  " + "─".repeat(40)));
+        console.log(chalk.gray(`\n  Config file: ${CredentialsManager.getCredentialsFile()}\n`));
+    });
 
 program.parse();

@@ -1,7 +1,7 @@
 {
     "name": "opentunnel-cli",
-    "version": "1.0.23",
-    "description": "Self-hosted tunnel solution to expose local ports to the internet via custom domains",
+    "version": "1.0.25",
+    "description": "Self-hosted tunnel solution to expose local ports to the internet via custom domains, ngrok, or Cloudflare Tunnel",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
     "bin": {
@@ -22,6 +22,8 @@
     "keywords": [
         "tunnel",
         "ngrok",
+        "cloudflare-tunnel",
+        "cloudflared",
         "proxy",
         "expose",
         "localhost",
@@ -49,6 +51,7 @@
         "acme-client": "^5.4.0",
         "chalk": "^4.1.2",
         "cloudflare": "^5.2.0",
+        "cloudflared": "^0.7.1",
         "commander": "^11.1.0",
         "dymo-api": "^1.2.30",
         "nanoid": "^3.3.7",

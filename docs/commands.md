@@ -18,6 +18,13 @@
 | `opentunnel setdomain` | Set default domain |
 | `opentunnel getdomain` | Show default domain |
 | `opentunnel cleardomain` | Remove default domain |
+| `opentunnel login` | Authenticate with a provider |
+| `opentunnel logout` | Remove stored credentials |
+| `opentunnel create` | Create a named tunnel |
+| `opentunnel delete` | Delete a named tunnel |
+| `opentunnel tunnels` | List named tunnels |
+| `opentunnel route` | Route DNS to a tunnel |
+| `opentunnel config` | Manage configuration |
 
 ## Expose Local (expl)
 
@@ -79,6 +86,23 @@ Options:
   -h, --host <host>           Local host (default: localhost)
   -r, --remote-port <port>    Remote TCP port (tcp only)
   --insecure                  Skip SSL verification
+
+Third-party Tunnels:
+  --ngrok                     Use ngrok instead of OpenTunnel
+  --region <region>           Ngrok region (us, eu, ap, au, sa, jp, in)
+  --cloudflare, --cf          Use Cloudflare Tunnel instead of OpenTunnel
+  --cf-hostname <hostname>    Custom hostname for Cloudflare (requires setup)
+```
+
+**Examples with third-party tunnels:**
+```bash
+# Using ngrok
+opentunnel http 3000 --ngrok
+opentunnel http 3000 --ngrok --region eu
+
+# Using Cloudflare Tunnel
+opentunnel http 3000 --cloudflare
+opentunnel http 3000 --cf
 ```
 
 ## Server Command
@@ -163,8 +187,131 @@ opentunnel down production
 opentunnel down
 ```
 
+## Authentication Commands
+
+Unified authentication for all providers.
+
+### Login
+
+```bash
+# Cloudflare - opens browser for OAuth
+opentunnel login cloudflare
+opentunnel login cf  # alias
+
+# ngrok - provide your authtoken
+opentunnel login ngrok --token YOUR_TOKEN
+```
+
+### Logout
+
+```bash
+opentunnel logout cloudflare
+opentunnel logout ngrok
+```
+
+Credentials are stored at `~/.opentunnel/credentials.json` with secure file permissions (0600).
+
+## Named Tunnel Management
+
+Create and manage named tunnels. Use `--cf` or `--provider cloudflare` to specify the provider.
+
+### Create
+
+```bash
+opentunnel create my-tunnel --cf
+opentunnel create my-tunnel --provider cloudflare
+```
+
+### List
+
+```bash
+opentunnel tunnels --cf
+```
+
+### Delete
+
+```bash
+opentunnel delete my-tunnel --cf
+opentunnel delete my-tunnel --cf --force  # skip confirmation
+```
+
+### Route DNS
+
+```bash
+opentunnel route my-tunnel app.example.com --cf
+```
+
+## Using Named Tunnels
+
+The `-n` flag works as the tunnel name when using Cloudflare:
+
+```bash
+# Quick tunnel (random URL)
+opentunnel http 3000 --cf
+
+# Named tunnel (persistent URL)
+opentunnel http 3000 --cf -n my-tunnel
+
+# With provider flag
+opentunnel http 3000 --provider cloudflare -n my-tunnel
+```
+
+In your config file:
+
+```yaml
+provider: cloudflare
+
+cloudflare:
+  tunnelName: my-tunnel  # Default for all tunnels
+
+tunnels:
+  - name: web
+    protocol: http
+    port: 3000
+    # Uses my-tunnel
+
+  - name: api
+    port: 4000
+    subdomain: api-tunnel  # Override: uses api-tunnel instead
+```
+
+## Config Commands
+
+Manage OpenTunnel configuration values.
+
+```bash
+# Set a value
+opentunnel config set ngrok.token YOUR_TOKEN
+opentunnel config set cloudflare.accountId YOUR_ACCOUNT_ID
+
+# Get a value
+opentunnel config get ngrok.token
+
+# List all stored config
+opentunnel config list
+```
+
+**Available keys:**
+
+| Key | Description |
+|-----|-------------|
+| `ngrok.token` | ngrok authentication token |
+| `cloudflare.accountId` | Cloudflare account ID |
+| `cloudflare.tunnelToken` | Cloudflare tunnel token |
+| `cloudflare.certPath` | Path to cloudflared cert.pem |
+
+**Credential Priority:**
+
+1. CLI flags (highest)
+2. Environment variables (`NGROK_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`)
+3. YAML config (`opentunnel.yml`)
+4. Stored credentials (`~/.opentunnel/credentials.json`)
+
+Credentials are stored at `~/.opentunnel/credentials.json` with secure file permissions (0600).
+
 ## See Also
 
 - [Client Guide](client-guide.md)
 - [Server Guide](server-guide.md)
 - [Configuration](configuration.md)
+- [Cloudflare Tunnel Setup](cloudflare-tunnel.md)

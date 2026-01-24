@@ -1,6 +1,8 @@
 # IP Access Control
 
-OpenTunnel provides built-in IP access control to restrict which clients can connect to your tunnel server. You can allow or deny specific IP addresses or entire network ranges using CIDR notation.
+OpenTunnel provides built-in IP access control to restrict which clients can connect. This works across all providers: OpenTunnel server, ngrok, and Cloudflare Tunnel.
+
+You can allow or deny specific IP addresses or entire network ranges using CIDR notation.
 
 ## Access Modes
 
@@ -173,3 +175,74 @@ The order of checks:
 1. **IP Access Control** (fast, local)
 2. **Dymo API** (external API call)
 3. **Authentication** (token check)
+
+## Cross-Provider IP Filtering
+
+IP filtering works with all tunnel providers. Use global security settings or per-tunnel overrides.
+
+### Global Security (All Tunnels)
+
+```yaml
+# Applied to all tunnels regardless of provider
+security:
+  ipAccess:
+    mode: denylist
+    denyList:
+      - 1.2.3.4
+      - 5.6.7.0/24
+
+tunnels:
+  - name: web
+    port: 3000
+    provider: cloudflare
+    # Inherits global ipAccess
+
+  - name: api
+    port: 4000
+    provider: ngrok
+    # Inherits global ipAccess
+```
+
+### Per-Tunnel Override
+
+```yaml
+security:
+  ipAccess:
+    mode: denylist
+    denyList:
+      - 1.2.3.4
+
+tunnels:
+  - name: public
+    port: 3000
+    provider: cloudflare
+    # Uses global config
+
+  - name: admin
+    port: 5000
+    provider: ngrok
+    # Override with stricter rules
+    ipAccess:
+      mode: allowlist
+      allowList:
+        - 192.168.0.0/16
+        - 10.0.0.0/8
+```
+
+### Provider Behavior
+
+| Provider | Filtering Location | Notes |
+|----------|-------------------|-------|
+| OpenTunnel | TunnelServer | WebSocket + HTTP requests |
+| Cloudflare | Proxy server | Before forwarding to local app |
+| ngrok | Proxy server | After ngrok forwards (see note) |
+
+**Note for ngrok:** IP filtering happens after ngrok forwards the request to OpenTunnel's proxy server. This means the request has already reached ngrok's servers. For true origin filtering with ngrok, use their paid [IP Policies](https://ngrok.com/docs/cloud-edge/modules/ip-restrictions/) feature.
+
+### Header Support
+
+IP addresses are extracted from (in order):
+1. `CF-Connecting-IP` (Cloudflare)
+2. `X-Real-IP` (nginx, proxies)
+3. `X-Forwarded-For` (standard proxy header, first IP)
+4. Socket `remoteAddress` (direct connection)

@@ -229,3 +229,43 @@ export interface DnsProvider {
     updateRecord(subdomain: string, ip: string): Promise<boolean>;
     deleteRecord(subdomain: string): Promise<boolean>;
 }
+
+// Credential types for authentication management
+
+/**
+ * Cloudflare credentials for tunnel management
+ */
+export interface CloudflareCredentials {
+    accountId?: string;       // Cloudflare account ID
+    tunnelToken?: string;     // Tunnel-specific token
+    certPath?: string;        // Path to cert.pem (from cloudflared login)
+}
+
+/**
+ * ngrok credentials
+ */
+export interface NgrokCredentials {
+    token: string;            // ngrok authtoken
+}
+
+/**
+ * Global credentials storage structure
+ */
+export interface GlobalCredentials {
+    ngrok?: NgrokCredentials;
+    cloudflare?: CloudflareCredentials;
+}
+
+/**
+ * Cloudflare named tunnel info (from cloudflared tunnel list)
+ */
+export interface CloudflareTunnelInfo {
+    id: string;
+    name: string;
+    createdAt: Date;
+    connections?: {
+        connIndex: number;
+        isRunning: boolean;
+        originIp: string;
+    }[];
+}
