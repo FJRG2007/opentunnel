@@ -4,6 +4,27 @@
 
 ---
 
+## Table of Contents
+
+- [Quick Start](#quick-start)
+  - [Installation](#installation)
+  - [As a Client](#as-a-client)
+  - [As a Server](#as-a-server)
+  - [Home Use (Hybrid Mode)](#home-use-hybrid-mode)
+  - [Using ngrok or Cloudflare Tunnel](#using-ngrok-or-cloudflare-tunnel)
+  - [Authentication & Named Tunnels](#authentication--named-tunnels)
+- [Configuration File](#configuration-file)
+  - [Client Mode](#client-mode-config)
+  - [Server Mode](#server-mode-config)
+  - [Hybrid Mode](#hybrid-mode-config)
+- [CLI Commands](#cli-commands)
+- [Documentation](#documentation)
+- [Architecture](#architecture)
+- [Troubleshooting](#troubleshooting-quick)
+- [License](#license)
+
+---
+
 ## Quick Start
 
 ### Installation
@@ -33,12 +54,20 @@ opentunnel quick 3000 -s example.com -n myapp
 Host your own tunnel server:
 
 ```bash
-# Public server
-opentunnel server -d --domain example.com --letsencrypt --email admin@example.com
+# Basic server (port 443 by default, self-signed SSL)
+sudo opentunnel server -d --domain example.com
 
-# Private server (with auth)
-opentunnel server -d --domain example.com --letsencrypt --email admin@example.com --auth-tokens "SECRET"
+# With Let's Encrypt SSL (recommended for production)
+sudo opentunnel server -d --domain example.com --letsencrypt --email admin@example.com
+
+# With authentication (recommended)
+sudo opentunnel server -d --domain example.com --auth-tokens "YOUR_SECRET_TOKEN"
+
+# Custom port (if 443 is occupied)
+opentunnel server -d --domain example.com --port 8443
 ```
+
+**Note:** Ports below 1024 (like 443) require `sudo` on Linux/macOS, or Administrator on Windows.
 
 **DNS Setup:** Point `op.example.com` and `*.op.example.com` to your server IP.
 
@@ -92,6 +121,145 @@ opentunnel config list
 
 ---
 
+## Configuration File
+
+Create `opentunnel.yml` in your project directory:
+
+### Client Mode Config
+
+Connect to a remote OpenTunnel server:
+
+```yaml
+server:
+  remote: example.com
+  token: YOUR_SECRET_TOKEN
+
+tunnels:
+  - name: webapp
+    protocol: http
+    port: 3000
+    subdomain: myapp
+
+  - name: api
+    protocol: http
+    port: 4000
+    subdomain: api
+```
+
+### Server Mode Config
+
+Run your own tunnel server:
+
+```yaml
+mode: server
+
+server:
+  domain: example.com
+  port: 443
+  https: true
+  auth:
+    required: true
+    tokens:
+      - "SECRET_TOKEN_1"
+      - "SECRET_TOKEN_2"
+```
+
+### Hybrid Mode Config
+
+Run server + tunnels in one process (ideal for home use):
+
+```yaml
+mode: hybrid
+
+server:
+  domain: yourdomain.com
+  port: 443
+
+tunnels:
+  - name: webapp
+    protocol: http
+    port: 3000
+    subdomain: app
+
+  - name: homeassistant
+    protocol: http
+    port: 8123
+    subdomain: home
+```
+
+**Start with:** `opentunnel up`
+
+---
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `opentunnel quick <port>` | Quick tunnel to a local port |
+| `opentunnel http <port>` | HTTP tunnel (supports --ngrok, --cloudflare) |
+| `opentunnel server` | Start a tunnel server |
+| `opentunnel up` | Start from opentunnel.yml |
+| `opentunnel down` | Stop running instances |
+| `opentunnel ps` | List running instances |
+| `opentunnel stop` | Stop background server |
+| `opentunnel status` | Check server status |
+| `opentunnel logs` | View server logs |
+
+**Server options:**
+- `-d, --detach` - Run in background
+- `--domain <domain>` - Server domain
+- `--port <port>` - Listen port (default: 443)
+- `--auth-tokens <tokens>` - Comma-separated auth tokens
+- `--letsencrypt` - Enable Let's Encrypt SSL
+- `--cloudflare-token` - Cloudflare API token for DNS
+- `--no-http-redirect` - Disable automatic HTTP→HTTPS redirect on port 80
+
+**Client options:**
+- `-s, --server <url>` - Server URL
+- `-t, --token <token>` - Auth token
+- `-n, --name <name>` - Custom subdomain
+- `--insecure` - Skip SSL verification
+
+---
+
+## Troubleshooting Quick
+
+### Port already in use
+
+**Linux/macOS:**
+```bash
+lsof -i :443
+netstat -tlnp | grep :443
+```
+
+**Windows (PowerShell):**
+```powershell
+netstat -ano | findstr :443
+Get-Process -Id (Get-NetTCPConnection -LocalPort 443).OwningProcess
+```
+
+### Server stop not working
+
+If you started the server with elevated privileges, stop it the same way:
+
+**Linux/macOS:**
+```bash
+sudo opentunnel stop
+```
+
+**Windows:**
+Run as Administrator.
+
+### Client can't connect
+
+1. Check firewall allows the port
+2. Verify DNS points to your server
+3. Use `--insecure` for self-signed certs
+
+See [Troubleshooting Guide](docs/troubleshooting.md) for more.
+
+---
+
 ## Documentation
 
 | Guide | Description |
@@ -100,6 +268,7 @@ opentunnel config list
 | [Server Guide](docs/server-guide.md) | Server deployment and configuration |
 | [Commands Reference](docs/commands.md) | All CLI commands and options |
 | [Configuration File](docs/configuration.md) | opentunnel.yml reference |
+| [Troubleshooting](docs/troubleshooting.md) | Common issues and solutions |
 | [Home Use Guide](docs/home-use-guide.md) | Running from home with port forwarding |
 | [Domain Setup](docs/domain-setup.md) | DNS and SSL configuration |
 | [DuckDNS & Free DNS](docs/duckdns-setup.md) | Free DNS services setup |

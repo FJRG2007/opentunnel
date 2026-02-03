@@ -23,7 +23,8 @@ SERVER_DOMAIN=example.com
 ```yaml
 # opentunnel.yml
 server:
-  remote: ${SERVER_DOMAIN:-localhost}
+  remote: ${SERVER_DOMAIN:-localhost}    # Can include port: example.com:8443
+  port: 443                              # Server port (change if 8080/443 occupied)
   token: ${AUTH_TOKEN}
 ```
 

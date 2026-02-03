@@ -300,6 +300,18 @@ export class TunnelServer extends EventEmitter {
             };
             this.httpServer = https.createServer(this.sslCredentials);
             this.isHttps = true;
+
+            // Create HTTP redirect server if enabled (default: true)
+            if (this.config.httpRedirect !== false) {
+                this.httpRedirectServer = http.createServer((req, res) => {
+                    const host = req.headers.host || this.config.domain;
+                    const port = this.config.publicPort || this.config.port;
+                    const portSuffix = port === 443 ? "" : `:${port}`;
+                    const redirectUrl = `https://${host}${portSuffix}${req.url || "/"}`;
+                    res.writeHead(301, { Location: redirectUrl });
+                    res.end();
+                });
+            }
         } else if (this.config.selfSignedHttps?.enabled) {
             // Self-signed certificates (local/development)
             this.logger.info("Setting up HTTPS with self-signed certificate");
@@ -321,7 +333,19 @@ export class TunnelServer extends EventEmitter {
             this.isHttps = true;
             this.logger.info(`Self-signed certificate valid until: ${certInfo.expiresAt.toISOString()}`);
             this.logger.info(`Certificate covers: ${certDomains.join(", ")}`);
-            this.logger.warn("⚠️  Using self-signed certificate - browsers will show security warning");
+            this.logger.warn("Using self-signed certificate - browsers will show security warning");
+
+            // Create HTTP redirect server if enabled (default: true)
+            if (this.config.httpRedirect !== false) {
+                this.httpRedirectServer = http.createServer((req, res) => {
+                    const host = req.headers.host || this.config.domain;
+                    const port = this.config.publicPort || this.config.port;
+                    const portSuffix = port === 443 ? "" : `:${port}`;
+                    const redirectUrl = `https://${host}${portSuffix}${req.url || "/"}`;
+                    res.writeHead(301, { Location: redirectUrl });
+                    res.end();
+                });
+            }
         } else if (this.config.autoHttps?.enabled) {
             // Automatic HTTPS with Let's Encrypt
             this.logger.info("Setting up automatic HTTPS with Let's Encrypt");

@@ -175,6 +175,8 @@ export interface ServerConfig {
         enabled: boolean;
         certsDir?: string;
     };
+    // HTTP to HTTPS redirect (default: true when using HTTPS)
+    httpRedirect?: boolean;
     autoHttps?: {
         enabled: boolean;
         email: string;

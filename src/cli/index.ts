@@ -11,6 +11,7 @@ import { formatBytes, formatDuration } from "../shared/utils";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import * as fs from "fs";
 import * as path from "path";
+import * as net from "net";
 
 
 // Tunnel provider types
@@ -120,6 +121,23 @@ function getRegistryPath(): string {
     const path = require("path");
     const registryDir = path.join(os.homedir(), ".opentunnel");
     return path.join(registryDir, "registry.json");
+}
+
+function checkPortInUse(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+        const server = net.createServer();
+        
+        server.listen(port, () => {
+            server.once('close', () => {
+                resolve(false);
+            });
+            server.close();
+        });
+        
+        server.on('error', () => {
+            resolve(true);
+        });
+    });
 }
 
 function getLogsDir(): string {
@@ -324,7 +342,7 @@ program
     .name("opentunnel")
     .alias("ot")
     .description("Expose local ports to the internet via custom domains, ngrok, or Cloudflare Tunnel")
-    .version("1.0.25");
+    .version("1.0.29");
 
 // Helper function to build WebSocket URL from domain
 // User only provides base domain (e.g., fjrg2007.com), system handles the rest
@@ -339,6 +357,14 @@ function buildServerUrl(server: string, basePath?: string): { url: string; displ
     // Remove trailing slash
     hostname = hostname.replace(/\/$/, "");
 
+    // Extract port if present (support both hostname:port and format)
+    let port = "";
+    const portMatch = hostname.match(/:(\d+)$/);
+    if (portMatch) {
+        port = `:${portMatch[1]}`;
+        hostname = hostname.slice(0, -portMatch[1].length - 1);
+    }
+
     // Build the full hostname with basePath if provided and not empty
     // If basePath is "op" (default), connect to op.domain.com
     // If basePath is empty or not provided, connect directly to domain.com
@@ -347,7 +373,7 @@ function buildServerUrl(server: string, basePath?: string): { url: string; displ
 
     // Always use wss:// for remote servers (--insecure only skips cert verification)
     return {
-        url: `wss://${fullHostname}/_tunnel`,
+        url: `wss://${fullHostname}${port}/_tunnel`,
         displayName: hostname,
     };
 }
@@ -406,12 +432,13 @@ program
                 basePath: basePath || "op",
                 tunnelPortRange: { min: 10000, max: 20000 },
                 selfSignedHttps: { enabled: true },
+                httpRedirect: true,
                 auth: options.token ? { required: true, tokens: [options.token] } : undefined,
             });
 
             try {
                 await localServer.start();
-                console.log(chalk.green(`✓ Server running on port ${serverPort}\n`));
+                console.log(chalk.green(`Server running on port ${serverPort}\n`));
             } catch (err: any) {
                 console.log(chalk.red(`Failed to start server: ${err.message}`));
                 process.exit(1);
@@ -660,6 +687,7 @@ program
                 basePath: basePath || "op",
                 tunnelPortRange: { min: 10000, max: 20000 },
                 selfSignedHttps: { enabled: true },
+                httpRedirect: true,
                 auth: options.token ? { required: true, tokens: [options.token] } : undefined,
             });
 
@@ -963,15 +991,16 @@ program
 program
     .command("server")
     .description("Start the OpenTunnel server (standalone mode)")
-    .option("-p, --port <port>", "Server port")
+    .option("-p, --port <port>", "Server port (default: 443)")
     .option("--public-port <port>", "Public port shown in URLs (default: same as port)")
-    .option("--domain <domain>", "Base domain")
+    .option("--domain <domain>", "Base domain (required)")
     .option("-b, --base-path <path>", "Subdomain base path (e.g., 'op' for *.op.domain.com)")
     .option("--host <host>", "Bind host")
     .option("--tcp-min <port>", "Minimum TCP port")
     .option("--tcp-max <port>", "Maximum TCP port")
     .option("--auth-tokens <tokens>", "Comma-separated auth tokens")
     .option("--no-https", "Disable HTTPS (use plain HTTP)")
+    .option("--no-http-redirect", "Disable HTTP→HTTPS redirect on port 80 (enabled by default)")
     .option("--https-cert <path>", "Path to SSL certificate (for custom certs)")
     .option("--https-key <path>", "Path to SSL private key (for custom certs)")
     .option("--letsencrypt", "Use Let's Encrypt instead of self-signed (requires port 80)")
@@ -1028,6 +1057,7 @@ program
             dymoBlockHosting: options.dymoBlockHosting ?? fileConfig.dymo?.blockHosting ?? false,
             dymoCache: options.dymoCache ?? fileConfig.dymo?.cacheResults ?? true,
             dymoCacheTtl: options.dymoCacheTtl ? parseInt(options.dymoCacheTtl) : (fileConfig.dymo?.cacheTTL ?? 300),
+            httpRedirect: options.httpRedirect !== false,
             detach: options.detach,
         };
         // Detached mode - run in background
@@ -1035,9 +1065,53 @@ program
             const { spawn } = await import("child_process");
             const fsAsync = await import("fs");
             const pathAsync = await import("path");
+            const os = await import("os");
 
             const pidFile = getPidFilePath("server");
             const logFile = getLogFilePath("server");
+
+            // Detect OS and elevated privileges
+            const isWindows = process.platform === "win32";
+            const isRoot = !isWindows && process.getuid && process.getuid() === 0;
+            const isSudo = !isWindows && !!process.env.SUDO_USER;
+            const isElevated = isRoot || isSudo;
+
+            // Check if port is already in use BEFORE starting
+            const port = parseInt(mergedOptions.port);
+            const isPortInUse = await checkPortInUse(port);
+            if (isPortInUse) {
+                console.log(chalk.red(`\nPort ${port} is already in use!`));
+                console.log(chalk.yellow(`\nCommon conflicts:`));
+                if (port === 8080) {
+                    console.log(chalk.gray(`  - Pi-hole often uses port 8080`));
+                    console.log(chalk.gray(`  - Other web admin panels`));
+                }
+                if (port === 80) {
+                    console.log(chalk.gray(`  - Web servers (Apache/Nginx/IIS)`));
+                    if (!isWindows) console.log(chalk.gray(`  - Requires root/sudo to bind on Linux/macOS`));
+                }
+                if (port === 443) {
+                    console.log(chalk.gray(`  - Web servers (Apache/Nginx/IIS) with HTTPS`));
+                    if (!isWindows) console.log(chalk.gray(`  - Requires root/sudo to bind on Linux/macOS`));
+                }
+                if (port === 3000) {
+                    console.log(chalk.gray(`  - Node.js development servers`));
+                }
+                if (port === 5000) {
+                    console.log(chalk.gray(`  - Python Flask development servers`));
+                }
+                console.log(chalk.cyan(`\nTo check what's using the port:`));
+                if (isWindows) {
+                    console.log(chalk.white(`  netstat -ano | findstr :${port}`));
+                    console.log(chalk.white(`  Get-Process -Id (Get-NetTCPConnection -LocalPort ${port}).OwningProcess`));
+                } else {
+                    console.log(chalk.white(`  lsof -i :${port}`));
+                    console.log(chalk.white(`  netstat -tlnp | grep :${port}`));
+                }
+                console.log(chalk.cyan(`\nTo use a different port:`));
+                console.log(chalk.white(`  opentunnel server -d --port 8443 --domain ${mergedOptions.domain}`));
+                process.exit(1);
+            }
 
             // Check if already running
             if (fsAsync.existsSync(pidFile)) {
@@ -1045,7 +1119,8 @@ program
                 try {
                     process.kill(parseInt(oldPid), 0);
                     console.log(chalk.yellow(`Server already running (PID: ${oldPid})`));
-                    console.log(chalk.gray(`Stop it with: opentunnel stop`));
+                    const stopCmd = isElevated && !isWindows ? "sudo opentunnel stop" : "opentunnel stop";
+                    console.log(chalk.gray(`Stop it with: ${stopCmd}`));
                     return;
                 } catch {
                     fsAsync.unlinkSync(pidFile);
@@ -1062,7 +1137,8 @@ program
             args.push("--tcp-max", mergedOptions.tcpMax);
             if (mergedOptions.publicPort) args.push("--public-port", mergedOptions.publicPort);
             if (mergedOptions.authTokens) args.push("--auth-tokens", mergedOptions.authTokens);
-            if (mergedOptions.https) args.push("--https");
+            if (mergedOptions.https === false) args.push("--no-https");
+            if (mergedOptions.letsencrypt) args.push("--letsencrypt");
             if (mergedOptions.email) args.push("--email", mergedOptions.email);
             if (mergedOptions.production) args.push("--production");
             if (mergedOptions.cloudflareToken) args.push("--cloudflare-token", mergedOptions.cloudflareToken);
@@ -1074,6 +1150,7 @@ program
             if (mergedOptions.dymoBlockBots === false) args.push("--no-dymo-block-bots");
             if (mergedOptions.dymoBlockProxies) args.push("--dymo-block-proxies");
             if (mergedOptions.dymoBlockHosting) args.push("--dymo-block-hosting");
+            if (mergedOptions.httpRedirect === false) args.push("--no-http-redirect");
 
             const out = fsAsync.openSync(logFile, "a");
             const err = fsAsync.openSync(logFile, "a");
@@ -1087,6 +1164,9 @@ program
             child.unref();
             fsAsync.writeFileSync(pidFile, String(child.pid));
 
+            const stopCmd = isElevated && !isWindows ? "sudo opentunnel stop" : "opentunnel stop";
+            const logsCmd = isWindows ? `type ${logFile}` : `tail -f ${logFile}`;
+
             console.log(chalk.green(`OpenTunnel server started in background`));
             console.log(chalk.gray(`  PID:      ${child.pid}`));
             console.log(chalk.gray(`  Port:     ${mergedOptions.port}`));
@@ -1094,13 +1174,58 @@ program
             console.log(chalk.gray(`  Log:      ${logFile}`));
             console.log(chalk.gray(`  PID file: ${pidFile}`));
             console.log("");
-            console.log(chalk.gray(`Stop with:  opentunnel stop`));
-            console.log(chalk.gray(`Logs:       tail -f ${logFile}`));
+            console.log(chalk.gray(`Stop with:  ${stopCmd}`));
+            console.log(chalk.gray(`Logs:       ${logsCmd}`));
+
+            // Show warning if running with elevated privileges on Unix
+            if (isSudo) {
+                console.log("");
+                console.log(chalk.yellow(`Warning: Started with sudo - use 'sudo opentunnel stop' to stop`));
+                console.log(chalk.gray(`   PID file saved in: ${pidFile}`));
+            }
             return;
         }
 
         // Normal foreground mode
         const { TunnelServer } = await import("../server/TunnelServer");
+
+        // Check if port is already in use
+        const port = parseInt(mergedOptions.port);
+        const isPortInUseFg = await checkPortInUse(port);
+        const isWindowsFg = process.platform === "win32";
+        if (isPortInUseFg) {
+            console.log(chalk.red(`\nPort ${port} is already in use!`));
+            console.log(chalk.yellow(`\nCommon conflicts:`));
+            if (port === 8080) {
+                console.log(chalk.gray(`  - Pi-hole often uses port 8080`));
+                console.log(chalk.gray(`  - Other web admin panels`));
+            }
+            if (port === 80) {
+                console.log(chalk.gray(`  - Web servers (Apache/Nginx/IIS)`));
+                if (!isWindowsFg) console.log(chalk.gray(`  - Requires root/sudo to bind on Linux/macOS`));
+            }
+            if (port === 443) {
+                console.log(chalk.gray(`  - Web servers (Apache/Nginx/IIS) with HTTPS`));
+                if (!isWindowsFg) console.log(chalk.gray(`  - Requires root/sudo to bind on Linux/macOS`));
+            }
+            if (port === 3000) {
+                console.log(chalk.gray(`  - Node.js development servers`));
+            }
+            if (port === 5000) {
+                console.log(chalk.gray(`  - Python Flask development servers`));
+            }
+            console.log(chalk.cyan(`\nTo check what's using the port:`));
+            if (isWindowsFg) {
+                console.log(chalk.white(`  netstat -ano | findstr :${port}`));
+                console.log(chalk.white(`  Get-Process -Id (Get-NetTCPConnection -LocalPort ${port}).OwningProcess`));
+            } else {
+                console.log(chalk.white(`  lsof -i :${port}`));
+                console.log(chalk.white(`  netstat -tlnp | grep :${port}`));
+            }
+            console.log(chalk.cyan(`\nTo use a different port:`));
+            console.log(chalk.white(`  opentunnel server --port 8443 --domain ${mergedOptions.domain}`));
+            process.exit(1);
+        }
 
         // Determine HTTPS configuration (self-signed enabled by default)
         let httpsConfig = undefined;
@@ -1164,6 +1289,7 @@ program
             https: httpsConfig,
             selfSignedHttps: selfSignedHttpsConfig,
             autoHttps: autoHttpsConfig,
+            httpRedirect: mergedOptions.httpRedirect,
             autoDns: detectDnsConfig(mergedOptions)
         });
 
@@ -1230,11 +1356,28 @@ program
     .action(async () => {
         const fs = await import("fs");
         const path = await import("path");
+        const os = await import("os");
 
         const pidFile = getPidFilePath("server");
+        const isWindows = process.platform === "win32";
+        const isRoot = !isWindows && process.getuid && process.getuid() === 0;
 
         if (!fs.existsSync(pidFile)) {
+            // On Unix systems, check if there might be a server running as root
+            if (!isWindows) {
+                const rootPidFile = "/root/.opentunnel/logs/server.pid";
+
+                if (!isRoot && fs.existsSync(rootPidFile)) {
+                    console.log(chalk.yellow("No server running in your user context"));
+                    console.log(chalk.cyan(`\nA server might be running as root.`));
+                    console.log(chalk.white(`   Try: sudo opentunnel stop`));
+                    return;
+                }
+            }
+
             console.log(chalk.yellow("No server running (PID file not found)"));
+            console.log(chalk.gray(`\nChecked: ${pidFile}`));
+            console.log(chalk.gray(`\nTo see all running instances: opentunnel ps`));
             return;
         }
 
@@ -1248,7 +1391,18 @@ program
             if (err.code === "ESRCH") {
                 fs.unlinkSync(pidFile);
                 console.log(chalk.yellow(`Server was not running (stale PID file removed)`));
-            } else console.log(chalk.red(`Failed to stop server: ${err.message}`));
+            } else if (err.code === "EPERM") {
+                console.log(chalk.red(`Permission denied to stop server (PID: ${pid})`));
+                if (isWindows) {
+                    console.log(chalk.cyan(`\nThe server was started with Administrator privileges.`));
+                    console.log(chalk.white(`   Run this command as Administrator.`));
+                } else {
+                    console.log(chalk.cyan(`\nThe server was started with elevated privileges.`));
+                    console.log(chalk.white(`   Try: sudo opentunnel stop`));
+                }
+            } else {
+                console.log(chalk.red(`Failed to stop server: ${err.message}`));
+            }
         }
     });
 
@@ -1907,6 +2061,44 @@ program
             const tcpMin = config.server?.tcpPortMin || 10000;
             const tcpMax = config.server?.tcpPortMax || 20000;
 
+            // Check if port is in use before starting server
+            const isPortInUseUp = await checkPortInUse(port);
+            const isWindowsUp = process.platform === "win32";
+            if (isPortInUseUp) {
+                console.log(chalk.red(`\nPort ${port} is already in use!`));
+                console.log(chalk.yellow(`\nCommon conflicts:`));
+                if (port === 8080) {
+                    console.log(chalk.gray(`  - Pi-hole often uses port 8080`));
+                    console.log(chalk.gray(`  - Other web admin panels`));
+                }
+                if (port === 80) {
+                    console.log(chalk.gray(`  - Web servers (Apache/Nginx/IIS)`));
+                    if (!isWindowsUp) console.log(chalk.gray(`  - Requires root/sudo to bind on Linux/macOS`));
+                }
+                if (port === 443) {
+                    console.log(chalk.gray(`  - Web servers (Apache/Nginx/IIS) with HTTPS`));
+                    if (!isWindowsUp) console.log(chalk.gray(`  - Requires root/sudo to bind on Linux/macOS`));
+                }
+                if (port === 3000) {
+                    console.log(chalk.gray(`  - Node.js development servers`));
+                }
+                if (port === 5000) {
+                    console.log(chalk.gray(`  - Python Flask development servers`));
+                }
+                console.log(chalk.cyan(`\nTo check what's using the port:`));
+                if (isWindowsUp) {
+                    console.log(chalk.white(`  netstat -ano | findstr :${port}`));
+                    console.log(chalk.white(`  Get-Process -Id (Get-NetTCPConnection -LocalPort ${port}).OwningProcess`));
+                } else {
+                    console.log(chalk.white(`  lsof -i :${port}`));
+                    console.log(chalk.white(`  netstat -tlnp | grep :${port}`));
+                }
+                console.log(chalk.cyan(`\nTo use a different port:`));
+                console.log(chalk.white(`  CLI: opentunnel up --port 8081`));
+                console.log(chalk.white(`  Config: server.port: 8081`));
+                process.exit(1);
+            }
+
             const spinner = ora("Starting server...").start();
 
             const server = new TunnelServer({
@@ -1920,6 +2112,7 @@ program
                     max: tcpMax,
                 },
                 selfSignedHttps: useHttps ? { enabled: true } : undefined,
+                httpRedirect: useHttps,  // Enable HTTP redirect when using HTTPS
                 // In hybrid mode, auth is not needed for localhost. For remote clients, still require token.
                 auth: config.server?.token && !isHybridMode ? { required: true, tokens: [config.server.token] } : undefined,
                 dymo: config.server?.dymo,

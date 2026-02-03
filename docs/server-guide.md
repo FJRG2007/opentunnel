@@ -8,6 +8,8 @@ Host your own OpenTunnel server for full control. Your server can be **public** 
 - **Domain** pointing to your server
 - **Ports** 443 (HTTPS) and optionally 10000-20000 (TCP tunnels)
 
+> **⚠️ Port Conflicts:** Make sure ports 8080 and 443 are not in use by other services (Pi-hole, Apache, Nginx, etc.). OpenTunnel will automatically warn you if these ports are occupied.
+
 ## DNS Configuration
 
 Create these DNS records pointing to your server:
@@ -35,6 +37,9 @@ opentunnel server -d --domain example.com --letsencrypt --email admin@example.co
 # Private server (requires token)
 opentunnel server -d --domain example.com --letsencrypt --email admin@example.com --auth-tokens "SECRET123"
 
+# Use custom port (if 8080/443 is occupied)
+opentunnel server -d --domain example.com --port 8443 --letsencrypt --email admin@example.com --auth-tokens "SECRET123"
+
 # Stop server
 opentunnel stop
 ```
@@ -46,6 +51,7 @@ Create `opentunnel.yml`:
 ```yaml
 server:
   domain: example.com
+  port: 443                   # Change if 8080/443 is occupied (e.g., 8443)
   # token: SECRET123          # Uncomment for private server
   # tcpPortMin: 10000
   # tcpPortMax: 20000

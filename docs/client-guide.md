@@ -48,6 +48,7 @@ opentunnel quick 5432 -s example.com -p tcp             # TCP tunnel
 opentunnel quick 3000 -s example.com -t SECRET          # With auth token
 opentunnel quick 3000 -s example.com --insecure         # Self-signed cert
 opentunnel quick 3000 -s example.com -b ""              # No basePath
+opentunnel quick 3000 -s example.com:8443               # Server with custom port
 opentunnel quick 3000 -s yourdomain.com --local-server  # Hybrid mode
 ```
 
