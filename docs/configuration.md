@@ -262,6 +262,8 @@ tunnels:
 | `remotePort` | number | Remote TCP port |
 | `autostart` | boolean | Start automatically (default: true) |
 | `provider` | string | Override global provider (opentunnel, ngrok, cloudflare) |
+| `streaming` | boolean | Enable streaming mode (10 min timeout for video/large files) |
+| `requestTimeout` | number | Custom request timeout in ms (0 = no timeout) |
 | `ngrokRegion` | string | ngrok region (us, eu, ap, au, sa, jp, in) |
 | `ngrokToken` | string | ngrok auth token (overrides global) |
 | `cfHostname` | string | Cloudflare hostname (REQUIRED for named tunnels) |

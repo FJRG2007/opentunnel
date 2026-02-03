@@ -18,6 +18,7 @@
   - [Server Mode](#server-mode-config)
   - [Hybrid Mode](#hybrid-mode-config)
 - [CLI Commands](#cli-commands)
+- [Streaming Large Files / Video](#streaming-large-files--video)
 - [Documentation](#documentation)
 - [Architecture](#architecture)
 - [Troubleshooting](#troubleshooting-quick)
@@ -144,6 +145,13 @@ tunnels:
     protocol: http
     port: 4000
     subdomain: api
+
+  - name: media
+    protocol: http
+    port: 8080
+    subdomain: media
+    streaming: true        # Enable streaming mode (10 min timeout)
+    # requestTimeout: 0    # Or no timeout (use with caution)
 ```
 
 ### Server Mode Config
@@ -219,6 +227,42 @@ tunnels:
 - `-t, --token <token>` - Auth token
 - `-n, --name <name>` - Custom subdomain
 - `--insecure` - Skip SSL verification
+- `--streaming` - Enable streaming mode (10 min timeout for video/large files)
+- `--timeout <ms>` - Custom request timeout in milliseconds (0 = no timeout)
+
+---
+
+## Streaming Large Files / Video
+
+For tunneling video streams or large file downloads, use the streaming options:
+
+```bash
+# Enable streaming mode (10 minute timeout)
+opentunnel http 8080 -s example.com --streaming
+
+# Custom timeout (5 minutes = 300000ms)
+opentunnel http 8080 -s example.com --timeout 300000
+
+# No timeout (use with caution - high memory usage)
+opentunnel http 8080 -s example.com --timeout 0
+```
+
+**In configuration file:**
+
+```yaml
+tunnels:
+  - name: media-server
+    protocol: http
+    port: 8080
+    subdomain: media
+    streaming: true          # 10 min timeout
+    # requestTimeout: 300000 # Or custom timeout in ms
+```
+
+> **Note:** HTTP tunnels buffer the entire response in memory before forwarding. For very large files (>500MB), consider using TCP tunnels which stream byte-by-byte:
+> ```bash
+> opentunnel tcp 8080 -s example.com
+> ```
 
 ---
 

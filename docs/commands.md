@@ -66,6 +66,8 @@ Options:
   -h, --host <host>           Local host (default: localhost)
   -t, --token <token>         Authentication token
   --insecure                  Skip SSL verification
+  --streaming                 Streaming mode (10 min timeout for video/large files)
+  --timeout <ms>              Custom request timeout in ms (0 = no timeout)
   --local-server              Start local server (hybrid mode)
   --server-port <port>        Local server port (default: 443)
 ```
@@ -86,6 +88,8 @@ Options:
   -h, --host <host>           Local host (default: localhost)
   -r, --remote-port <port>    Remote TCP port (tcp only)
   --insecure                  Skip SSL verification
+  --streaming                 Streaming mode (10 min timeout for video/large files)
+  --timeout <ms>              Custom request timeout in ms (0 = no timeout)
 
 Third-party Tunnels:
   --ngrok                     Use ngrok instead of OpenTunnel

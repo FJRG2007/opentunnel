@@ -11,6 +11,9 @@ import {
     Message,
     HttpRequestMessage,
     HttpResponseMessage,
+    HttpResponseStartMessage,
+    HttpResponseChunkMessage,
+    HttpResponseEndMessage,
     TcpDataMessage,
     TunnelRequestMessage,
     AuthMessage,
@@ -75,6 +78,10 @@ interface PendingRequest {
     resolve: (response: HttpResponseMessage) => void;
     reject: (error: Error) => void;
     timeout: NodeJS.Timeout;
+    // For streaming responses
+    res?: ServerResponse;
+    streaming?: boolean;
+    headersWritten?: boolean;
 }
 
 export class TunnelServer extends EventEmitter {
@@ -767,6 +774,15 @@ export class TunnelServer extends EventEmitter {
             case "http_response":
                 this.handleHttpResponse(message as HttpResponseMessage);
                 break;
+            case "http_response_start":
+                this.handleHttpResponseStart(message as HttpResponseStartMessage);
+                break;
+            case "http_response_chunk":
+                this.handleHttpResponseChunk(message as HttpResponseChunkMessage);
+                break;
+            case "http_response_end":
+                this.handleHttpResponseEnd(message as HttpResponseEndMessage);
+                break;
             case "tcp_data":
                 this.handleTcpData(message as TcpDataMessage);
                 break;
@@ -1173,22 +1189,27 @@ export class TunnelServer extends EventEmitter {
             tunnel.stats.connections++;
 
             try {
-                const response = await this.waitForResponse(tunnel, requestId, httpRequest);
+                const response = await this.waitForResponse(tunnel, requestId, httpRequest, res);
 
-                res.writeHead(response.statusCode, response.headers as http.OutgoingHttpHeaders);
-                if (response.body) {
-                    // Decode base64 if the response body is encoded (for binary data like gzip)
-                    const bodyBuffer = response.isBase64
-                        ? Buffer.from(response.body, "base64")
-                        : Buffer.from(response.body, "utf-8");
-                    tunnel.stats.bytesOut += bodyBuffer.length;
-                    res.end(bodyBuffer);
-                } else {
-                    res.end();
+                // Check if response was already sent via streaming
+                if (!res.writableEnded) {
+                    res.writeHead(response.statusCode, response.headers as http.OutgoingHttpHeaders);
+                    if (response.body) {
+                        // Decode base64 if the response body is encoded (for binary data like gzip)
+                        const bodyBuffer = response.isBase64
+                            ? Buffer.from(response.body, "base64")
+                            : Buffer.from(response.body, "utf-8");
+                        tunnel.stats.bytesOut += bodyBuffer.length;
+                        res.end(bodyBuffer);
+                    } else {
+                        res.end();
+                    }
                 }
             } catch (err) {
-                res.writeHead(502, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ error: "Bad gateway - tunnel client not responding" }));
+                if (!res.writableEnded) {
+                    res.writeHead(502, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ error: "Bad gateway - tunnel client not responding" }));
+                }
             }
         });
     }
@@ -1234,21 +1255,26 @@ export class TunnelServer extends EventEmitter {
             tunnel.stats.connections++;
 
             try {
-                const response = await this.waitForResponse(tunnel, requestId, httpRequest);
+                const response = await this.waitForResponse(tunnel, requestId, httpRequest, res);
 
-                res.writeHead(response.statusCode, response.headers as http.OutgoingHttpHeaders);
-                if (response.body) {
-                    const bodyBuffer = response.isBase64
-                        ? Buffer.from(response.body, "base64")
-                        : Buffer.from(response.body, "utf-8");
-                    tunnel.stats.bytesOut += bodyBuffer.length;
-                    res.end(bodyBuffer);
-                } else {
-                    res.end();
+                // Check if response was already sent via streaming
+                if (!res.writableEnded) {
+                    res.writeHead(response.statusCode, response.headers as http.OutgoingHttpHeaders);
+                    if (response.body) {
+                        const bodyBuffer = response.isBase64
+                            ? Buffer.from(response.body, "base64")
+                            : Buffer.from(response.body, "utf-8");
+                        tunnel.stats.bytesOut += bodyBuffer.length;
+                        res.end(bodyBuffer);
+                    } else {
+                        res.end();
+                    }
                 }
             } catch (err) {
-                res.writeHead(502, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ error: "Bad gateway - tunnel client not responding" }));
+                if (!res.writableEnded) {
+                    res.writeHead(502, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ error: "Bad gateway - tunnel client not responding" }));
+                }
             }
         });
     }
@@ -1256,15 +1282,38 @@ export class TunnelServer extends EventEmitter {
     private waitForResponse(
         tunnel: Tunnel,
         requestId: string,
-        request: HttpRequestMessage
+        request: HttpRequestMessage,
+        res?: ServerResponse
     ): Promise<HttpResponseMessage> {
         return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                this.pendingRequests.delete(requestId);
-                reject(new Error("Request timeout"));
-            }, 30000);
+            // Timeout priority: custom > streaming mode > default
+            // requestTimeout: 0 = no timeout, streaming: true = 10 minutes, default = 30 seconds
+            const defaultTimeout = 30000;
+            const streamingTimeout = 600000; // 10 minutes
 
-            this.pendingRequests.set(requestId, { resolve, reject, timeout });
+            let timeoutMs = defaultTimeout;
+            if (tunnel.config.requestTimeout !== undefined) {
+                timeoutMs = tunnel.config.requestTimeout; // 0 = no timeout
+            } else if (tunnel.config.streaming) {
+                timeoutMs = streamingTimeout;
+            }
+
+            let timeout: NodeJS.Timeout | null = null;
+            if (timeoutMs > 0) {
+                timeout = setTimeout(() => {
+                    this.pendingRequests.delete(requestId);
+                    reject(new Error("Request timeout"));
+                }, timeoutMs);
+            }
+
+            this.pendingRequests.set(requestId, {
+                resolve,
+                reject,
+                timeout: timeout!,
+                res,
+                streaming: false,
+                headersWritten: false,
+            });
             this.send(tunnel.client.ws, request);
         });
     }
@@ -1275,6 +1324,47 @@ export class TunnelServer extends EventEmitter {
             clearTimeout(pending.timeout);
             this.pendingRequests.delete(message.requestId);
             pending.resolve(message);
+        }
+    }
+
+    private handleHttpResponseStart(message: HttpResponseStartMessage): void {
+        const pending = this.pendingRequests.get(message.requestId);
+        if (pending && pending.res && !pending.headersWritten) {
+            pending.headersWritten = true;
+            pending.streaming = true;
+            // Write headers immediately
+            pending.res.writeHead(message.statusCode, message.headers as http.OutgoingHttpHeaders);
+        }
+    }
+
+    private handleHttpResponseChunk(message: HttpResponseChunkMessage): void {
+        const pending = this.pendingRequests.get(message.requestId);
+        if (pending && pending.res && pending.streaming) {
+            // Decode base64 and write chunk immediately
+            const chunk = Buffer.from(message.data, "base64");
+            pending.res.write(chunk);
+        }
+    }
+
+    private handleHttpResponseEnd(message: HttpResponseEndMessage): void {
+        const pending = this.pendingRequests.get(message.requestId);
+        if (pending) {
+            clearTimeout(pending.timeout);
+            this.pendingRequests.delete(message.requestId);
+            if (pending.res && pending.streaming) {
+                // End the response
+                pending.res.end();
+            }
+            // Resolve with empty message (response already sent via streaming)
+            pending.resolve({
+                type: "http_response",
+                id: message.id,
+                timestamp: message.timestamp,
+                tunnelId: message.tunnelId,
+                requestId: message.requestId,
+                statusCode: 200,
+                headers: {},
+            });
         }
     }
 

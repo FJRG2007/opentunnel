@@ -342,7 +342,7 @@ program
     .name("opentunnel")
     .alias("ot")
     .description("Expose local ports to the internet via custom domains, ngrok, or Cloudflare Tunnel")
-    .version("1.0.30");
+    .version("1.0.32");
 
 // Helper function to build WebSocket URL from domain
 // User only provides base domain (e.g., fjrg2007.com), system handles the rest
@@ -389,6 +389,8 @@ program
     .option("-h, --host <host>", "Local host to forward to", "localhost")
     .option("-t, --token <token>", "Authentication token (if server requires it)")
     .option("--insecure", "Skip SSL certificate verification (for self-signed certs)")
+    .option("--streaming", "Enable streaming mode (longer timeouts for video/large files)")
+    .option("--timeout <ms>", "Custom request timeout in milliseconds")
     .option("--local-server", "Start a local server before connecting")
     .option("--server-port <port>", "Port for the local server (default: 443)", "443")
     .action(async (port: string, options) => {
@@ -500,6 +502,8 @@ program
                 localHost: options.host,
                 localPort: parseInt(port),
                 subdomain: options.subdomain,
+                streaming: options.streaming || false,
+                requestTimeout: options.timeout ? parseInt(options.timeout) : undefined,
             });
 
             return { client, tunnelId, publicUrl };
@@ -719,6 +723,8 @@ program
                 localHost: options.host,
                 localPort: parseInt(port),
                 subdomain: options.subdomain,
+                streaming: options.streaming || false,
+                requestTimeout: options.timeout ? parseInt(options.timeout) : undefined,
             });
 
             spinner.succeed("Tunnel established!");
@@ -790,6 +796,8 @@ program
     .option("--server-port <port>", "Server port", "443")
     .option("--https", "Use HTTPS for local connection")
     .option("--insecure", "Skip SSL verification (for self-signed certs)")
+    .option("--streaming", "Enable streaming mode (longer timeouts for video/large files)")
+    .option("--timeout <ms>", "Custom request timeout in milliseconds")
     .option("--ngrok", "Use ngrok instead of OpenTunnel server")
     .option("--region <region>", "Ngrok region (us, eu, ap, au, sa, jp, in)", "us")
     .option("--cloudflare, --cf", "Use Cloudflare Tunnel instead of OpenTunnel server")
@@ -838,6 +846,8 @@ program
                 serverUrl,
                 token: options.token,
                 insecure: options.insecure,
+                streaming: options.streaming,
+                requestTimeout: options.timeout ? parseInt(options.timeout) : undefined,
             });
             return;
         }
@@ -3195,6 +3205,8 @@ interface TunnelOptions {
     serverUrl: string;
     token?: string;
     insecure?: boolean; // Skip SSL verification for self-signed certs
+    streaming?: boolean; // Enable streaming mode (longer timeouts)
+    requestTimeout?: number; // Custom timeout in ms (0 = no timeout)
 }
 
 interface NgrokOptions {
@@ -3237,6 +3249,8 @@ async function createTunnel(options: TunnelOptions): Promise<void> {
             localPort: options.localPort,
             subdomain: options.subdomain,
             remotePort: options.remotePort,
+            streaming: options.streaming,
+            requestTimeout: options.requestTimeout,
         });
 
         spinner.succeed("Tunnel established!");

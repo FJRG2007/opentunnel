@@ -120,6 +120,38 @@ opentunnel ps         # Check status
 | `-b, --base-path` | Server base path (default: op) |
 | `--insecure` | Skip SSL verification |
 | `--local-server` | Start local server (hybrid mode) |
+| `--streaming` | Enable streaming mode (10 min timeout for video/large files) |
+| `--timeout <ms>` | Custom request timeout in milliseconds (0 = no timeout) |
+
+## Streaming Large Files / Video
+
+For tunneling video streams or large file downloads:
+
+```bash
+# Enable streaming mode (10 minute timeout)
+opentunnel http 8080 -s example.com --streaming
+
+# Custom timeout (5 minutes)
+opentunnel http 8080 -s example.com --timeout 300000
+
+# No timeout (use with caution - high memory usage)
+opentunnel http 8080 -s example.com --timeout 0
+```
+
+**Configuration file:**
+```yaml
+tunnels:
+  - name: media
+    protocol: http
+    port: 8080
+    subdomain: media
+    streaming: true
+```
+
+> **Note:** HTTP tunnels buffer responses in memory. For very large files (>500MB), consider TCP tunnels which stream byte-by-byte:
+> ```bash
+> opentunnel tcp 8080 -s example.com
+> ```
 
 ## See Also
 

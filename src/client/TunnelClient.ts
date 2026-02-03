@@ -13,6 +13,9 @@ import {
     TcpCloseMessage,
     TunnelResponseMessage,
     AuthResponseMessage,
+    HttpResponseStartMessage,
+    HttpResponseChunkMessage,
+    HttpResponseEndMessage,
 } from "../shared/types";
 import { generateNotRunningPage } from "../lib/pages";
 import {
@@ -392,15 +395,39 @@ export class TunnelClient extends EventEmitter {
         const tunnel = this.tunnels.get(message.tunnelId);
         if (!tunnel) return;
 
-        const { localHost, localPort } = tunnel.config;
+        const { localHost, localPort, streaming, requestTimeout } = tunnel.config;
         const isHttps = tunnel.config.protocol === "https";
 
+        // Calculate timeout: custom > streaming mode > default
+        // requestTimeout: 0 = no timeout, streaming: true = 10 minutes, default = 30 seconds
+        const defaultTimeout = 30000;
+        const streamingTimeout = 600000; // 10 minutes
+        const timeoutMs = requestTimeout !== undefined ? requestTimeout : (streaming ? streamingTimeout : defaultTimeout);
+
+        // Use chunked streaming for streaming mode (video, large files)
+        if (streaming) {
+            try {
+                await this.forwardHttpRequestStreaming(
+                    localHost,
+                    localPort,
+                    message,
+                    isHttps,
+                    timeoutMs
+                );
+            } catch (err: any) {
+                this.sendHttpError(message, localHost, localPort, err);
+            }
+            return;
+        }
+
+        // Standard buffered response for non-streaming
         try {
             const response = await this.forwardHttpRequest(
                 localHost,
                 localPort,
                 message,
-                isHttps
+                isHttps,
+                timeoutMs
             );
 
             this.send({
@@ -415,48 +442,136 @@ export class TunnelClient extends EventEmitter {
                 isBase64: response.isBase64,
             });
         } catch (err: any) {
-            // Check if it's a connection refused error (no app running on port)
-            const isConnectionRefused = err.code === "ECONNREFUSED" ||
-                                        err.message?.includes("ECONNREFUSED") ||
-                                        err.message?.includes("connect ECONNREFUSED");
+            this.sendHttpError(message, localHost, localPort, err);
+        }
+    }
 
-            if (isConnectionRefused) {
-                // Return friendly HTML page
-                const htmlResponse = generateNotRunningPage({ host: localHost, port: localPort });
+    private sendHttpError(message: HttpRequestMessage, localHost: string, localPort: number, err: any): void {
+        // Check if it's a connection refused error (no app running on port)
+        const isConnectionRefused = err.code === "ECONNREFUSED" ||
+                                    err.message?.includes("ECONNREFUSED") ||
+                                    err.message?.includes("connect ECONNREFUSED");
+
+        if (isConnectionRefused) {
+            // Return friendly HTML page
+            const htmlResponse = generateNotRunningPage({ host: localHost, port: localPort });
+            this.send({
+                type: "http_response",
+                id: generateId(),
+                timestamp: Date.now(),
+                tunnelId: message.tunnelId,
+                requestId: message.requestId,
+                statusCode: 502,
+                headers: {
+                    "content-type": "text/html; charset=utf-8",
+                    "cache-control": "no-cache",
+                },
+                body: Buffer.from(htmlResponse).toString("base64"),
+                isBase64: true,
+            });
+        } else {
+            this.send({
+                type: "http_response",
+                id: generateId(),
+                timestamp: Date.now(),
+                tunnelId: message.tunnelId,
+                requestId: message.requestId,
+                statusCode: 502,
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ error: err.message }),
+            });
+        }
+    }
+
+    private forwardHttpRequestStreaming(
+        host: string,
+        port: number,
+        request: HttpRequestMessage,
+        useHttps: boolean,
+        timeoutMs: number = 600000
+    ): Promise<void> {
+        return new Promise((resolve, reject) => {
+            const httpModule = useHttps ? https : http;
+
+            const originalHost = request.headers.host || request.headers.Host;
+            const forwardedHeaders: Record<string, string | string[] | undefined> = {
+                ...request.headers,
+                "x-forwarded-host": originalHost,
+                "x-forwarded-proto": useHttps ? "https" : "http",
+                "x-forwarded-for": request.headers["x-forwarded-for"] || "127.0.0.1",
+            };
+
+            const options: http.RequestOptions = {
+                hostname: host,
+                port,
+                path: request.path,
+                method: request.method,
+                headers: forwardedHeaders,
+            };
+
+            const req = httpModule.request(options, (res) => {
+                // Send response start with headers
                 this.send({
-                    type: "http_response",
+                    type: "http_response_start",
                     id: generateId(),
                     timestamp: Date.now(),
-                    tunnelId: message.tunnelId,
-                    requestId: message.requestId,
-                    statusCode: 502,
-                    headers: {
-                        "content-type": "text/html; charset=utf-8",
-                        "cache-control": "no-cache",
-                    },
-                    body: Buffer.from(htmlResponse).toString("base64"),
-                    isBase64: true,
+                    tunnelId: request.tunnelId,
+                    requestId: request.requestId,
+                    statusCode: res.statusCode || 200,
+                    headers: res.headers as Record<string, string | string[] | undefined>,
                 });
-            } else {
-                this.send({
-                    type: "http_response",
-                    id: generateId(),
-                    timestamp: Date.now(),
-                    tunnelId: message.tunnelId,
-                    requestId: message.requestId,
-                    statusCode: 502,
-                    headers: { "content-type": "application/json" },
-                    body: JSON.stringify({ error: err.message }),
+
+                // Send each chunk as it arrives
+                res.on("data", (chunk: Buffer) => {
+                    this.send({
+                        type: "http_response_chunk",
+                        id: generateId(),
+                        timestamp: Date.now(),
+                        tunnelId: request.tunnelId,
+                        requestId: request.requestId,
+                        data: chunk.toString("base64"),
+                    });
+                });
+
+                res.on("end", () => {
+                    // Send end marker
+                    this.send({
+                        type: "http_response_end",
+                        id: generateId(),
+                        timestamp: Date.now(),
+                        tunnelId: request.tunnelId,
+                        requestId: request.requestId,
+                    });
+                    resolve();
+                });
+
+                res.on("error", (err) => {
+                    reject(err);
+                });
+            });
+
+            req.on("error", reject);
+
+            if (timeoutMs > 0) {
+                req.setTimeout(timeoutMs, () => {
+                    req.destroy();
+                    reject(new Error("Request timeout"));
                 });
             }
-        }
+
+            if (request.body) {
+                req.write(request.body);
+            }
+            req.end();
+        });
     }
 
     private forwardHttpRequest(
         host: string,
         port: number,
         request: HttpRequestMessage,
-        useHttps: boolean
+        useHttps: boolean,
+        timeoutMs: number = 30000
     ): Promise<{ statusCode: number; headers: Record<string, string | string[] | undefined>; body: string; isBase64?: boolean }> {
         return new Promise((resolve, reject) => {
             const httpModule = useHttps ? https : http;
@@ -496,10 +611,14 @@ export class TunnelClient extends EventEmitter {
             });
 
             req.on("error", reject);
-            req.setTimeout(30000, () => {
-                req.destroy();
-                reject(new Error("Request timeout"));
-            });
+
+            // Only set timeout if > 0 (0 = no timeout)
+            if (timeoutMs > 0) {
+                req.setTimeout(timeoutMs, () => {
+                    req.destroy();
+                    reject(new Error("Request timeout"));
+                });
+            }
 
             if (request.body) {
                 req.write(request.body);

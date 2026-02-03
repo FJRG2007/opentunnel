@@ -13,6 +13,10 @@ export interface TunnelConfig {
         username: string;
         password: string;
     };
+    // Enable streaming mode for large files/video (longer timeouts)
+    streaming?: boolean;
+    // Custom request timeout in milliseconds (default: 30000, streaming: 600000, 0 = no timeout)
+    requestTimeout?: number;
 }
 
 export interface TunnelInfo {
@@ -35,6 +39,9 @@ export type MessageType =
     | "tunnel_close"
     | "http_request"
     | "http_response"
+    | "http_response_start"
+    | "http_response_chunk"
+    | "http_response_end"
     | "tcp_data"
     | "tcp_close"
     | "ping"
@@ -97,6 +104,28 @@ export interface HttpResponseMessage extends BaseMessage {
     isBase64?: boolean; // True if body is base64 encoded (for binary data like gzip)
 }
 
+// Streaming response messages (for large files/video)
+export interface HttpResponseStartMessage extends BaseMessage {
+    type: "http_response_start";
+    tunnelId: string;
+    requestId: string;
+    statusCode: number;
+    headers: Record<string, string | string[] | undefined>;
+}
+
+export interface HttpResponseChunkMessage extends BaseMessage {
+    type: "http_response_chunk";
+    tunnelId: string;
+    requestId: string;
+    data: string; // base64 encoded chunk
+}
+
+export interface HttpResponseEndMessage extends BaseMessage {
+    type: "http_response_end";
+    tunnelId: string;
+    requestId: string;
+}
+
 export interface TcpDataMessage extends BaseMessage {
     type: "tcp_data";
     tunnelId: string;
@@ -124,6 +153,9 @@ export type Message =
     | TunnelCloseMessage
     | HttpRequestMessage
     | HttpResponseMessage
+    | HttpResponseStartMessage
+    | HttpResponseChunkMessage
+    | HttpResponseEndMessage
     | TcpDataMessage
     | TcpCloseMessage
     | ErrorMessage
