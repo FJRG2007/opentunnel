@@ -47,6 +47,7 @@ export interface TunnelOperationResult {
 }
 
 export class CloudflareTunnelClient extends EventEmitter {
+    private static readyMessageShown = false; // Show "ready" message only once
     private config: CloudflareTunnelConfig;
     private process: ChildProcess | null = null;
     private proxyServer: Server | null = null;
@@ -95,7 +96,10 @@ export class CloudflareTunnelClient extends EventEmitter {
         }
 
         this.started = true;
-        this.logger.info("Cloudflare Tunnel client ready");
+        if (!CloudflareTunnelClient.readyMessageShown) {
+            this.logger.info("Cloudflare Tunnel client ready");
+            CloudflareTunnelClient.readyMessageShown = true;
+        }
     }
 
     async disconnect(): Promise<void> {
@@ -323,8 +327,9 @@ export class CloudflareTunnelClient extends EventEmitter {
     }
 
     /**
-     * Run a named tunnel (requires prior cloudflared login and tunnel creation)
+     * Run a named tunnel (auto-creates if it doesn't exist)
      * Named tunnels provide a persistent hostname
+     * Requires: opentunnel login cloudflare
      */
     async runNamedTunnel(options: {
         protocol: TunnelProtocol;
@@ -339,6 +344,23 @@ export class CloudflareTunnelClient extends EventEmitter {
         if (!this.binPath) {
             const cf = await getCloudflaredModule();
             this.binPath = cf.bin;
+        }
+
+        // Auto-create tunnel if it doesn't exist
+        const tunnelName = this.config.tunnelName;
+        const exists = await CloudflareTunnelClient.tunnelExists(tunnelName);
+
+        if (!exists) {
+            this.logger.info(`Tunnel '${tunnelName}' not found, creating...`);
+            const result = await CloudflareTunnelClient.createNamedTunnel(tunnelName);
+
+            if (!result.success) {
+                if (result.error?.includes("login") || result.error?.includes("You did not provide credentials")) {
+                    throw new Error(`Not logged in to Cloudflare. Run: opentunnel login cloudflare`);
+                }
+                throw new Error(`Failed to create tunnel '${tunnelName}': ${result.error}`);
+            }
+            this.logger.info(`Tunnel '${tunnelName}' created`);
         }
 
         const useHttps = options.protocol === "https";
@@ -383,10 +405,10 @@ export class CloudflareTunnelClient extends EventEmitter {
                      output.includes("Started tunnel")) && !started) {
                     started = true;
 
-                    // For named tunnels, the public URL is based on the hostname config
+                    // For named tunnels, hostname is required for a working URL
                     const publicUrl = this.config.hostname
                         ? `https://${this.config.hostname}`
-                        : `https://${this.config.tunnelName}.cfargotunnel.com`;
+                        : `[tunnel:${this.config.tunnelName}] (requires cfHostname for public URL)`;
 
                     const tunnel: CloudflareTunnel = {
                         id: tunnelId,
@@ -492,6 +514,32 @@ export class CloudflareTunnelClient extends EventEmitter {
     static async getBinPath(): Promise<string> {
         const cf = await getCloudflaredModule();
         return cf.bin;
+    }
+
+    /**
+     * Check if a named tunnel exists
+     */
+    static async tunnelExists(name: string): Promise<boolean> {
+        const binPath = await CloudflareTunnelClient.ensureInstalled();
+
+        return new Promise((resolve) => {
+            const proc = spawn(binPath, ["tunnel", "info", name], {
+                stdio: ["ignore", "pipe", "pipe"],
+                shell: process.platform === "win32",
+            });
+
+            let errorOutput = "";
+            proc.stderr?.on("data", (data) => { errorOutput += data.toString(); });
+
+            proc.on("close", (code) => {
+                // Exit code 0 means tunnel exists
+                resolve(code === 0);
+            });
+
+            proc.on("error", () => {
+                resolve(false);
+            });
+        });
     }
 
     /**

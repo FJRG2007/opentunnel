@@ -342,7 +342,7 @@ program
     .name("opentunnel")
     .alias("ot")
     .description("Expose local ports to the internet via custom domains, ngrok, or Cloudflare Tunnel")
-    .version("1.0.29");
+    .version("1.0.30");
 
 // Helper function to build WebSocket URL from domain
 // User only provides base domain (e.g., fjrg2007.com), system handles the rest
@@ -2022,7 +2022,17 @@ program
         const isServerMode = mode === "server";
         const isHybridMode = mode === "hybrid";
 
-        if (!hasDomainConfig && !remote) {
+        // Check if using external provider (cloudflare/ngrok) which doesn't need domain/remote
+        const globalProvider = config.provider || "opentunnel";
+        const isExternalProvider = globalProvider === "cloudflare" || globalProvider === "ngrok";
+
+        // Also check if all tunnels use external providers
+        const allTunnelsExternal = hasTunnels && tunnelsToStart.every(t => {
+            const provider = t.provider || globalProvider;
+            return provider === "cloudflare" || provider === "ngrok";
+        });
+
+        if (!hasDomainConfig && !remote && !isExternalProvider && !allTunnelsExternal) {
             console.log(chalk.red("Missing configuration."));
             console.log(chalk.gray("\nAdd to your config:"));
             console.log(chalk.cyan("\n  # Run your own server:"));
@@ -2031,7 +2041,36 @@ program
             console.log(chalk.cyan("\n  # Or connect to a remote server:"));
             console.log(chalk.white("  server:"));
             console.log(chalk.white("    remote: example.com"));
+            console.log(chalk.cyan("\n  # Or use an external provider:"));
+            console.log(chalk.white("  provider: cloudflare  # or ngrok"));
             process.exit(1);
+        }
+
+        // External provider mode: skip OpenTunnel server, use cloudflare/ngrok directly
+        if ((isExternalProvider || allTunnelsExternal) && !hasDomainConfig && !remote) {
+            if (!hasTunnels) {
+                console.log(chalk.red("No tunnels configured."));
+                console.log(chalk.gray("\nAdd tunnels to your config:"));
+                console.log(chalk.white("  tunnels:"));
+                console.log(chalk.white("    - name: web"));
+                console.log(chalk.white("      protocol: http"));
+                console.log(chalk.white("      port: 80"));
+                process.exit(1);
+            }
+
+            console.log(chalk.cyan(`Starting ${tunnelsToStart.length} tunnel(s) via ${globalProvider}...\n`));
+
+            try {
+                await startTunnelsFromConfig(tunnelsToStart, "", undefined, true, config);
+
+                console.log(chalk.gray("\nPress Ctrl+C to stop"));
+
+                // Keep running
+                await new Promise(() => {});
+            } catch (error: any) {
+                console.log(chalk.red(`Failed to start tunnels: ${error.message}`));
+                process.exit(1);
+            }
         }
 
         if (isClientMode) {
@@ -2963,8 +3002,17 @@ async function startTunnelsFromConfig(
     for (const tunnel of cloudflareTunnels) {
         const spinner = ora(`Creating Cloudflare tunnel: ${tunnel.name}...`).start();
         const cfHostname = tunnel.cfHostname || globalConfig?.cloudflare?.hostname;
-        // For Cloudflare: subdomain = tunnel name
+        // For Cloudflare: subdomain = tunnel name (for named tunnels)
         const cfTunnelName = tunnel.subdomain || globalConfig?.cloudflare?.tunnelName;
+
+        // Validate: named tunnels require cfHostname for public access
+        if (cfTunnelName && !cfHostname) {
+            spinner.fail(`${tunnel.name}: Named tunnel '${cfTunnelName}' requires cfHostname`);
+            console.log(chalk.gray(`  Add to your config:`));
+            console.log(chalk.white(`    cfHostname: ${cfTunnelName}.yourdomain.com`));
+            console.log(chalk.gray(`  Or remove 'subdomain' for a quick tunnel with random URL`));
+            continue;
+        }
 
         // Merge IP access config: tunnel-specific > global security > none
         const { IpFilter } = await import("../shared/ip-filter");
@@ -2982,6 +3030,15 @@ async function startTunnelsFromConfig(
 
         try {
             await client.connect();
+
+            // Auto-route DNS if using named tunnel with hostname
+            if (cfTunnelName && cfHostname) {
+                const routeResult = await CloudflareTunnelClient.routeDns(cfTunnelName, cfHostname);
+                if (!routeResult.success && !routeResult.error?.includes("already exists")) {
+                    spinner.warn(`${tunnel.name}: DNS routing failed: ${routeResult.error}`);
+                }
+            }
+
             const { tunnelId, publicUrl } = await client.createTunnel({
                 protocol: tunnel.protocol as TunnelProtocol,
                 localHost: tunnel.host || "localhost",
