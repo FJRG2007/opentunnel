@@ -9,17 +9,11 @@ OpenTunnel supports Cloudflare Tunnel as an alternative to the built-in server o
 ```bash
 # First run will download cloudflared automatically
 opentunnel http 3000 --cf
-
-# Or.
-
-opentunnel http 3000 --cloudflare
 ```
-
-The binary is managed by the `cloudflared` npm package and stored in `node_modules/cloudflared/bin/`.
 
 ## Quick Tunnels (Free, No Account Required)
 
-Quick tunnels are the easiest way to expose a local service. They provide a random `*.trycloudflare.com` URL.
+Quick tunnels are the easiest way to expose a local service. They provide a random `*.trycloudflare.com` URL that changes each time.
 
 ### CLI Usage
 
@@ -32,22 +26,11 @@ opentunnel http 3000 --cf
 
 # Expose with HTTPS origin (if your local server uses HTTPS)
 opentunnel http 3000 --cf --https
-
-# Skip TLS verification for self-signed certs
-opentunnel http 3000 --cf --insecure
-```
-
-### Quick Expose
-
-```bash
-opentunnel expose 3000 --cloudflare
-opentunnel expose 8080 --cf
 ```
 
 ### Configuration File (opentunnel.yml)
 
 ```yaml
-# Use Cloudflare for all tunnels
 provider: cloudflare
 
 tunnels:
@@ -65,141 +48,115 @@ Start with:
 opentunnel up
 ```
 
-### Mixed Providers
+Each tunnel gets its own unique `*.trycloudflare.com` URL.
 
-Use Cloudflare for specific tunnels only:
+## Named Tunnels (Persistent URLs)
 
-```yaml
-# Default: OpenTunnel server
-server:
-  remote: example.com
-  token: ${AUTH_TOKEN}
-
-tunnels:
-  # Uses OpenTunnel server
-  - name: main
-    protocol: http
-    port: 3000
-    subdomain: app
-
-  # Uses Cloudflare Tunnel
-  - name: public-api
-    protocol: http
-    port: 4000
-    provider: cloudflare
-```
-
-## Comparison: OpenTunnel vs ngrok vs Cloudflare
-
-| Feature | OpenTunnel | ngrok | Cloudflare Tunnel |
-|---------|------------|-------|-------------------|
-| Self-hosted | Yes | No | No |
-| Custom domain | Yes (own) | Paid | Yes (with account) |
-| Free tier | Unlimited | Limited | Generous |
-| TCP tunnels | Yes | Yes | Named tunnels only |
-| Setup complexity | Medium | Easy | Easy |
-| Auth required | Optional | Yes | No (quick tunnels) |
-
-## Limitations
-
-### Quick Tunnels
-- Random URL each time (no persistent hostname)
-- HTTP/HTTPS only (no TCP)
-- No custom domains
-
-### TCP Tunnels
-Cloudflare Tunnel supports TCP but requires additional setup:
-
-1. Create a named tunnel in Cloudflare dashboard
-2. Configure the tunnel with a `config.yml`
-3. Use `cloudflared tunnel run <name>`
-
-For simple TCP tunneling, ngrok or OpenTunnel server are easier options:
-
-```bash
-# TCP with ngrok
-opentunnel tcp 5432 --ngrok
-
-# TCP with OpenTunnel server
-opentunnel tcp 5432 -s your-server.com
-```
-
-## Named Tunnels
-
-For persistent hostnames and custom domains, use OpenTunnel's integrated named tunnel management.
+Named tunnels require a Cloudflare account and a domain in Cloudflare. They provide persistent URLs that don't change.
 
 ### 1. Login to Cloudflare
 
 ```bash
-# Opens browser for Cloudflare OAuth authentication
 opentunnel login cloudflare
 ```
 
-Credentials are stored securely at `~/.opentunnel/credentials.json`.
+Opens a browser for Cloudflare OAuth authentication. Credentials are stored at `~/.opentunnel/credentials.json`.
 
-### 2. Create a Named Tunnel
+### 2. Configure Named Tunnels
 
-```bash
-opentunnel create my-tunnel --cf
-```
+Named tunnels **require** `cfHostname` - a domain you own that's managed by Cloudflare:
 
-### 3. List Your Tunnels
-
-```bash
-opentunnel tunnels --cf
-```
-
-### 4. Route DNS
-
-Create a CNAME record pointing to your tunnel:
-
-```bash
-opentunnel route my-tunnel myapp.example.com
-```
-
-### 5. Use the Named Tunnel
-
-**Via CLI - use `-n` to specify the tunnel name:**
-```bash
-opentunnel http 3000 --cf -n my-tunnel
-```
-
-**Via Configuration File:**
 ```yaml
 provider: cloudflare
-
-cloudflare:
-  tunnelName: my-tunnel  # Default tunnel for all
 
 tunnels:
   - name: web
     protocol: http
     port: 3000
+    subdomain: web-tunnel          # Tunnel name (auto-created if doesn't exist)
+    cfHostname: web.example.com    # REQUIRED: Your domain in Cloudflare
 
   - name: api
     protocol: http
     port: 4000
-    subdomain: api-tunnel  # Override with different tunnel
+    subdomain: api-tunnel
+    cfHostname: api.example.com
 ```
 
-### 6. Delete a Tunnel
+**Important:**
+- `subdomain`: The name of the Cloudflare tunnel (will be auto-created if it doesn't exist)
+- `cfHostname`: Your domain managed by Cloudflare DNS (REQUIRED for named tunnels)
+
+### 3. Run
 
 ```bash
-opentunnel delete my-tunnel --cf
-
-# Skip confirmation
-opentunnel delete my-tunnel --cf --force
+opentunnel up
 ```
 
-## IP Filtering with Cloudflare Tunnels
+OpenTunnel will:
+1. Auto-create the tunnel if it doesn't exist
+2. Auto-configure DNS routing
+3. Start the tunnel
 
-Apply IP filtering to Cloudflare tunnels for additional security:
+### Manual Tunnel Management
+
+```bash
+# Create a tunnel manually
+opentunnel create my-tunnel --cf
+
+# List your tunnels
+opentunnel tunnels --cf
+
+# Route DNS manually
+opentunnel route my-tunnel myapp.example.com
+
+# Delete a tunnel
+opentunnel delete my-tunnel --cf
+```
+
+## Quick vs Named Tunnels
+
+| Feature | Quick Tunnels | Named Tunnels |
+|---------|---------------|---------------|
+| URL | Random `*.trycloudflare.com` | Your domain (`app.example.com`) |
+| Persistence | Changes each run | Persistent |
+| Account required | No | Yes |
+| Domain required | No | Yes (in Cloudflare) |
+| Setup | None | Login + configure cfHostname |
+
+## Mixed Providers
+
+Use different providers for different tunnels:
+
+```yaml
+# Default provider
+provider: cloudflare
+
+tunnels:
+  # Uses Cloudflare quick tunnel
+  - name: public
+    protocol: http
+    port: 3000
+
+  # Uses ngrok
+  - name: dev
+    protocol: http
+    port: 4000
+    provider: ngrok
+
+  # Uses OpenTunnel server
+  - name: internal
+    protocol: http
+    port: 5000
+    provider: opentunnel
+```
+
+## IP Filtering
+
+Apply IP filtering to Cloudflare tunnels:
 
 ```yaml
 provider: cloudflare
-
-cloudflare:
-  tunnelName: my-tunnel
 
 tunnels:
   - name: admin
@@ -212,35 +169,28 @@ tunnels:
         - 10.0.0.0/8
 ```
 
-IP filtering is handled by OpenTunnel's proxy server before forwarding to your local app.
-
 ## Programmatic Usage
 
 ```typescript
 import { CloudflareTunnelClient } from "opentunnel";
 
 // Quick tunnel (random URL)
-const quickClient = new CloudflareTunnelClient({
+const client = new CloudflareTunnelClient({
     protocol: "http",
 });
 
-await quickClient.connect();
-const { publicUrl } = await quickClient.createTunnel({
+await client.connect();
+const { publicUrl } = await client.createTunnel({
     protocol: "http",
     localHost: "localhost",
     localPort: 3000,
 });
-console.log(`Quick Tunnel: ${publicUrl}`);
+console.log(`Tunnel: ${publicUrl}`);
 
-// Named tunnel with IP filtering
+// Named tunnel
 const namedClient = new CloudflareTunnelClient({
     tunnelName: "my-tunnel",
     hostname: "myapp.example.com",
-    noTlsVerify: true,
-    ipAccess: {
-        mode: "allowlist",
-        allowList: ["192.168.0.0/16"],
-    },
 });
 
 await namedClient.connect();
@@ -249,36 +199,33 @@ const result = await namedClient.createTunnel({
     localHost: "localhost",
     localPort: 3000,
 });
-console.log(`Named Tunnel: ${result.publicUrl}`);
 
-// Static methods for tunnel management
-const tunnels = await CloudflareTunnelClient.listTunnels();
+// Static methods
 await CloudflareTunnelClient.createNamedTunnel("new-tunnel");
 await CloudflareTunnelClient.routeDns("new-tunnel", "app.example.com");
 await CloudflareTunnelClient.deleteTunnel("old-tunnel");
-
-// Cleanup
-await namedClient.closeTunnel(result.tunnelId);
-await namedClient.disconnect();
+const tunnels = await CloudflareTunnelClient.listTunnels();
 ```
 
 ## Troubleshooting
 
+### "Named tunnel requires cfHostname"
+
+Named tunnels need a domain configured in Cloudflare. Either:
+- Add `cfHostname: yourdomain.com` to your config
+- Remove `subdomain` to use a quick tunnel with random URL
+
+### "Not logged in to Cloudflare"
+
+Run `opentunnel login cloudflare` first.
+
 ### "Timeout waiting for Cloudflare Tunnel URL"
 
 1. Check your internet connection
-2. Check firewall settings - cloudflared needs outbound HTTPS access
-3. Try again - sometimes the first connection takes longer
-
-### "Failed to create tunnel"
-
-1. Check if another cloudflared process is running
-2. Verify internet connectivity
-3. Check if Cloudflare services are available
+2. Check firewall settings - cloudflared needs outbound HTTPS
+3. Try again - first connection may take longer
 
 ### Manual Installation (if automatic fails)
-
-If automatic installation fails, you can install cloudflared manually:
 
 ```bash
 # Windows
@@ -296,4 +243,4 @@ sudo dpkg -i cloudflared.deb
 
 - [Cloudflare Tunnel Documentation](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
 - [Commands Reference](commands.md)
-- [Client Guide](client-guide.md)
+- [Configuration Guide](configuration.md)

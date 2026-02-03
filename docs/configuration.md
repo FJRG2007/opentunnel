@@ -55,6 +55,8 @@ tunnels:
 
 ### Using Cloudflare Tunnel
 
+**Quick tunnels** (random URL, no account required):
+
 ```yaml
 provider: cloudflare
 
@@ -62,31 +64,39 @@ tunnels:
   - name: web
     protocol: http
     port: 3000
-```
-
-### Using Cloudflare Named Tunnels
-
-For persistent hostnames, use named tunnels (requires `opentunnel login cloudflare` first):
-
-```yaml
-provider: cloudflare
-
-cloudflare:
-  tunnelName: my-tunnel  # Default named tunnel
-
-tunnels:
-  - name: web
-    protocol: http
-    port: 3000
-    # Uses my-tunnel (from cloudflare.tunnelName)
 
   - name: api
     protocol: http
     port: 4000
-    subdomain: api-tunnel  # Override: uses api-tunnel instead
 ```
 
-The `subdomain` field works as the tunnel name when using Cloudflare provider.
+Each tunnel gets a unique `*.trycloudflare.com` URL.
+
+### Using Cloudflare Named Tunnels
+
+For persistent hostnames, use named tunnels. Requires:
+1. `opentunnel login cloudflare` first
+2. A domain managed by Cloudflare DNS
+3. Both `subdomain` (tunnel name) and `cfHostname` (your domain)
+
+```yaml
+provider: cloudflare
+
+tunnels:
+  - name: web
+    protocol: http
+    port: 3000
+    subdomain: web-tunnel        # Tunnel name (auto-created if doesn't exist)
+    cfHostname: web.example.com  # REQUIRED: Your domain in Cloudflare
+
+  - name: api
+    protocol: http
+    port: 4000
+    subdomain: api-tunnel
+    cfHostname: api.example.com
+```
+
+**Important:** Named tunnels auto-create if they don't exist and auto-configure DNS routing.
 
 ### Mixed Providers
 
@@ -254,13 +264,13 @@ tunnels:
 | `provider` | string | Override global provider (opentunnel, ngrok, cloudflare) |
 | `ngrokRegion` | string | ngrok region (us, eu, ap, au, sa, jp, in) |
 | `ngrokToken` | string | ngrok auth token (overrides global) |
-| `cfHostname` | string | Cloudflare custom hostname |
+| `cfHostname` | string | Cloudflare hostname (REQUIRED for named tunnels) |
 | `ipAccess` | object | Per-tunnel IP filtering (overrides global security) |
 
-**Note:** The `subdomain` field has different meanings:
+**Note:** The `subdomain` field has different meanings per provider:
 - **OpenTunnel**: Requested subdomain (e.g., `myapp` → `myapp.op.domain.com`)
 - **ngrok**: Requested subdomain (paid feature)
-- **Cloudflare**: Named tunnel to use (overrides `cloudflare.tunnelName`)
+- **Cloudflare**: Named tunnel name. Requires `cfHostname` to work.
 
 ## Global Options
 
