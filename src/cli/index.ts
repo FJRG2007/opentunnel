@@ -337,7 +337,7 @@ program
     .name("opentunnel")
     .alias("ot")
     .description("Expose local ports to the internet via custom domains, ngrok, or Cloudflare Tunnel")
-    .version("1.0.33");
+    .version("1.0.34");
 
 // Helper function to build WebSocket URL from domain
 // User only provides base domain (e.g., fjrg2007.com), system handles the rest
@@ -4031,7 +4031,7 @@ program
 
         console.log(chalk.green(`\n✓ Diagnostic report generated: ${outputFile}`));
         console.log(chalk.gray(`\nInclude this file when reporting issues at:`));
-        console.log(chalk.cyan("  https://github.com/anthropics/opentunnel/issues\n"));
+        console.log(chalk.cyan("  https://github.com/FJRG2007/opentunnel/issues\n"));
     });
 
 program.parse();
