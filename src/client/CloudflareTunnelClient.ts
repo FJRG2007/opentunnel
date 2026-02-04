@@ -408,7 +408,7 @@ export class CloudflareTunnelClient extends EventEmitter {
                     // For named tunnels, hostname is required for a working URL
                     const publicUrl = this.config.hostname
                         ? `https://${this.config.hostname}`
-                        : `[tunnel:${this.config.tunnelName}] (requires cfHostname for public URL)`;
+                        : `[tunnel:${this.config.tunnelName}] (requires hostname for public URL)`;
 
                     const tunnel: CloudflareTunnel = {
                         id: tunnelId,

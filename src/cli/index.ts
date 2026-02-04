@@ -28,11 +28,11 @@ interface TunnelConfigYaml {
     autostart?: boolean;
     // Provider-specific options (override global provider)
     provider?: TunnelProvider;
-    // ngrok options
-    ngrokRegion?: "us" | "eu" | "ap" | "au" | "sa" | "jp" | "in";
-    ngrokToken?: string;
-    // cloudflare options
-    cfHostname?: string;
+    // Generic provider options (work with any provider that supports them)
+    hostname?: string;      // Custom hostname (cloudflare named tunnels, ngrok custom domains)
+    tunnelName?: string;    // Named tunnel identifier (cloudflare tunnel name)
+    region?: string;        // Region preference (ngrok: us, eu, ap, au, sa, jp, in)
+    token?: string;         // Auth token (ngrok authtoken)
     // Per-tunnel IP filtering (overrides global security.ipAccess)
     ipAccess?: IpAccessConfig;
 }
@@ -55,16 +55,11 @@ interface OpenTunnelConfig {
     mode?: OpenTunnelMode;         // Explicitly set the mode (auto-detected if not set)
     // Global tunnel provider (can be overridden per-tunnel)
     provider?: TunnelProvider;     // "opentunnel" (default), "ngrok", or "cloudflare"
-    // ngrok global options
-    ngrok?: {
-        token?: string;
-        region?: "us" | "eu" | "ap" | "au" | "sa" | "jp" | "in";
-    };
-    // cloudflare global options
-    cloudflare?: {
-        hostname?: string;   // Custom hostname (requires named tunnel)
-        tunnelName?: string; // Default named tunnel to use
-    };
+    // Global provider options (apply to all tunnels unless overridden)
+    hostname?: string;             // Default custom hostname
+    tunnelName?: string;           // Default named tunnel
+    region?: string;               // Default region (ngrok: us, eu, ap, au, sa, jp, in)
+    token?: string;                // Default auth token (ngrok authtoken)
     // Global security settings (can be overridden per-tunnel)
     security?: {
         ipAccess?: IpAccessConfig;
@@ -342,7 +337,7 @@ program
     .name("opentunnel")
     .alias("ot")
     .description("Expose local ports to the internet via custom domains, ngrok, or Cloudflare Tunnel")
-    .version("1.0.32");
+    .version("1.0.33");
 
 // Helper function to build WebSocket URL from domain
 // User only provides base domain (e.g., fjrg2007.com), system handles the rest
@@ -799,9 +794,9 @@ program
     .option("--streaming", "Enable streaming mode (longer timeouts for video/large files)")
     .option("--timeout <ms>", "Custom request timeout in milliseconds")
     .option("--ngrok", "Use ngrok instead of OpenTunnel server")
-    .option("--region <region>", "Ngrok region (us, eu, ap, au, sa, jp, in)", "us")
+    .option("--region <region>", "Region (ngrok: us, eu, ap, au, sa, jp, in)", "us")
     .option("--cloudflare, --cf", "Use Cloudflare Tunnel instead of OpenTunnel server")
-    .option("--cf-hostname <hostname>", "Custom hostname for Cloudflare Tunnel")
+    .option("--hostname <hostname>", "Custom hostname for tunnel (cloudflare named tunnels)")
     .option("--provider <provider>", "Tunnel provider (opentunnel, ngrok, cloudflare)")
     .action(async (port: string, options) => {
         // Determine provider
@@ -815,8 +810,8 @@ program
                 protocol: options.https ? "https" : "http",
                 localHost: options.host,
                 localPort: parseInt(port),
-                hostname: options.cfHostname,
-                tunnelName: options.subdomain,  // -n works as tunnel name for CF
+                hostname: options.hostname,
+                tunnelName: options.subdomain,  // -n works as tunnel name
                 noTlsVerify: options.insecure,
             });
             return;
@@ -874,9 +869,9 @@ program
     .option("-h, --host <host>", "Local host", "localhost")
     .option("--insecure", "Skip SSL verification (for self-signed certs)")
     .option("--ngrok", "Use ngrok instead of OpenTunnel server")
-    .option("--region <region>", "Ngrok region (us, eu, ap, au, sa, jp, in)", "us")
+    .option("--region <region>", "Region (ngrok: us, eu, ap, au, sa, jp, in)", "us")
     .option("--cloudflare, --cf", "Use Cloudflare Tunnel (TCP requires named tunnel)")
-    .option("--cf-hostname <hostname>", "Custom hostname for Cloudflare Tunnel")
+    .option("--hostname <hostname>", "Custom hostname for tunnel")
     .option("--provider <provider>", "Tunnel provider (opentunnel, ngrok, cloudflare)")
     .action(async (port: string, options) => {
         // Determine provider
@@ -895,7 +890,7 @@ program
                 protocol: "tcp",
                 localHost: options.host,
                 localPort: parseInt(port),
-                hostname: options.cfHostname,
+                hostname: options.hostname,
                 tunnelName: options.subdomain,
                 noTlsVerify: options.insecure,
             });
@@ -2973,8 +2968,8 @@ async function startTunnelsFromConfig(
     const ngrokTunnels = tunnelsByProvider.get("ngrok") || [];
     for (const tunnel of ngrokTunnels) {
         const spinner = ora(`Creating ngrok tunnel: ${tunnel.name}...`).start();
-        const ngrokToken = tunnel.ngrokToken || globalConfig?.ngrok?.token;
-        const ngrokRegion = tunnel.ngrokRegion || globalConfig?.ngrok?.region || "us";
+        const ngrokToken = tunnel.token || globalConfig?.token;
+        const ngrokRegion = tunnel.region || globalConfig?.region || "us";
 
         // Merge IP access config: tunnel-specific > global security > none
         const { IpFilter } = await import("../shared/ip-filter");
@@ -2985,7 +2980,7 @@ async function startTunnelsFromConfig(
 
         const client = new NgrokClient({
             authtoken: ngrokToken,
-            region: ngrokRegion,
+            region: ngrokRegion as "us" | "eu" | "ap" | "au" | "sa" | "jp" | "in",
             ipAccess,
         });
 
@@ -3011,16 +3006,16 @@ async function startTunnelsFromConfig(
     const cloudflareTunnels = tunnelsByProvider.get("cloudflare") || [];
     for (const tunnel of cloudflareTunnels) {
         const spinner = ora(`Creating Cloudflare tunnel: ${tunnel.name}...`).start();
-        const cfHostname = tunnel.cfHostname || globalConfig?.cloudflare?.hostname;
-        // For Cloudflare: subdomain = tunnel name (for named tunnels)
-        const cfTunnelName = tunnel.subdomain || globalConfig?.cloudflare?.tunnelName;
+        const tunnelHostname = tunnel.hostname || globalConfig?.hostname;
+        // tunnelName takes priority, subdomain as fallback for compatibility
+        const namedTunnel = tunnel.tunnelName || tunnel.subdomain || globalConfig?.tunnelName;
 
-        // Validate: named tunnels require cfHostname for public access
-        if (cfTunnelName && !cfHostname) {
-            spinner.fail(`${tunnel.name}: Named tunnel '${cfTunnelName}' requires cfHostname`);
+        // Validate: named tunnels require hostname for public access
+        if (namedTunnel && !tunnelHostname) {
+            spinner.fail(`${tunnel.name}: Named tunnel '${namedTunnel}' requires hostname`);
             console.log(chalk.gray(`  Add to your config:`));
-            console.log(chalk.white(`    cfHostname: ${cfTunnelName}.yourdomain.com`));
-            console.log(chalk.gray(`  Or remove 'subdomain' for a quick tunnel with random URL`));
+            console.log(chalk.white(`    hostname: ${namedTunnel}.yourdomain.com`));
+            console.log(chalk.gray(`  Or remove 'tunnelName' for a quick tunnel with random URL`));
             continue;
         }
 
@@ -3032,8 +3027,8 @@ async function startTunnelsFromConfig(
         );
 
         const client = new CloudflareTunnelClient({
-            hostname: cfHostname,
-            tunnelName: cfTunnelName,
+            hostname: tunnelHostname,
+            tunnelName: namedTunnel,
             protocol: tunnel.protocol === "https" ? "https" : "http",
             ipAccess,
         });
@@ -3042,8 +3037,8 @@ async function startTunnelsFromConfig(
             await client.connect();
 
             // Auto-route DNS if using named tunnel with hostname
-            if (cfTunnelName && cfHostname) {
-                const routeResult = await CloudflareTunnelClient.routeDns(cfTunnelName, cfHostname);
+            if (namedTunnel && tunnelHostname) {
+                const routeResult = await CloudflareTunnelClient.routeDns(namedTunnel, tunnelHostname);
                 if (!routeResult.success && !routeResult.error?.includes("already exists")) {
                     spinner.warn(`${tunnel.name}: DNS routing failed: ${routeResult.error}`);
                 }
@@ -3056,7 +3051,7 @@ async function startTunnelsFromConfig(
             });
             activeTunnels.push({ name: tunnel.name, tunnelId, publicUrl, provider: "cloudflare", client });
             clients.push({ provider: "cloudflare", client });
-            const tunnelMode = cfTunnelName ? ` [${cfTunnelName}]` : "";
+            const tunnelMode = namedTunnel ? ` [${namedTunnel}]` : "";
             spinner.succeed(`${tunnel.name}: ${publicUrl}${tunnelMode} (cloudflare)`);
         } catch (err: any) {
             spinner.fail(`${tunnel.name}: ${err.message}`);
@@ -3859,6 +3854,184 @@ configCommand
 
         console.log(chalk.gray("  " + "─".repeat(40)));
         console.log(chalk.gray(`\n  Config file: ${CredentialsManager.getCredentialsFile()}\n`));
+    });
+
+// =============================================================================
+// Diagnose command - Generate troubleshooting report
+// =============================================================================
+program
+    .command("diagnose")
+    .description("Generate a diagnostic report for troubleshooting")
+    .option("-o, --output <file>", "Output file name", "opentunnel-diagnostic.txt")
+    .action(async (options) => {
+        const os = await import("os");
+        const { execSync } = await import("child_process");
+
+        const lines: string[] = [];
+        const addSection = (title: string) => {
+            lines.push("");
+            lines.push("=".repeat(60));
+            lines.push(title);
+            lines.push("=".repeat(60));
+        };
+
+        const addLine = (label: string, value: string) => {
+            lines.push(`${label.padEnd(25)}: ${value}`);
+        };
+
+        const runCommand = (cmd: string): string => {
+            try {
+                return execSync(cmd, { encoding: "utf-8", timeout: 5000 }).trim();
+            } catch {
+                return "(not available)";
+            }
+        };
+
+        lines.push("OpenTunnel Diagnostic Report");
+        lines.push(`Generated: ${new Date().toISOString()}`);
+
+        // System Information
+        addSection("SYSTEM INFORMATION");
+        addLine("OpenTunnel Version", program.version() || "unknown");
+        addLine("Node.js Version", process.version);
+        addLine("Platform", `${os.platform()} (${os.arch()})`);
+        addLine("OS Release", os.release());
+        addLine("OS Type", os.type());
+        addLine("Hostname", os.hostname());
+        addLine("Working Directory", process.cwd());
+        addLine("Home Directory", os.homedir());
+        addLine("Total Memory", `${Math.round(os.totalmem() / 1024 / 1024 / 1024)} GB`);
+        addLine("Free Memory", `${Math.round(os.freemem() / 1024 / 1024 / 1024)} GB`);
+
+        // Provider Status
+        addSection("PROVIDER STATUS");
+
+        // Check cloudflared
+        const cloudflaredVersion = runCommand("cloudflared --version");
+        addLine("cloudflared", cloudflaredVersion.includes("cloudflared") ? cloudflaredVersion.split("\n")[0] : "(not installed)");
+
+        // Check ngrok
+        const ngrokVersion = runCommand("ngrok version");
+        addLine("ngrok", ngrokVersion.includes("ngrok") ? ngrokVersion : "(not installed)");
+
+        // Configuration
+        addSection("CONFIGURATION");
+        const configPath = path.join(process.cwd(), CONFIG_FILE);
+        if (fs.existsSync(configPath)) {
+            addLine("Config File", configPath);
+            try {
+                const config = loadConfig(configPath);
+                if (config) {
+                    addLine("Provider", config.provider || "opentunnel");
+                    addLine("Mode", config.mode || "auto");
+                    addLine("Tunnel Name", config.tunnelName || "(not set)");
+                    addLine("Hostname", config.hostname || "(not set)");
+                    addLine("Region", config.region || "(not set)");
+                    addLine("Tunnels Count", config.tunnels?.length?.toString() || "0");
+                    if (config.tunnels) {
+                        lines.push("");
+                        lines.push("Configured Tunnels:");
+                        for (const t of config.tunnels) {
+                            lines.push(`  - ${t.name}: ${t.protocol}://localhost:${t.port} (provider: ${t.provider || config.provider || "opentunnel"})`);
+                        }
+                    }
+                }
+            } catch (err: any) {
+                addLine("Config Parse Error", err.message);
+            }
+        } else {
+            addLine("Config File", "(not found)");
+        }
+
+        // Credentials
+        addSection("CREDENTIALS STATUS");
+        const credsFile = CredentialsManager.getCredentialsFile();
+        addLine("Credentials File", fs.existsSync(credsFile) ? "exists" : "not found");
+
+        try {
+            const credsMgr = new CredentialsManager();
+            const creds = credsMgr.getAll();
+            addLine("ngrok Token", creds.ngrok?.token ? "configured" : "not set");
+            addLine("Cloudflare Auth", creds.cloudflare ? "configured" : "not set");
+        } catch {
+            addLine("Credentials", "(error reading)");
+        }
+
+        // Running Instances
+        addSection("RUNNING INSTANCES");
+        const runDir = path.join(os.homedir(), ".opentunnel", "run");
+        if (fs.existsSync(runDir)) {
+            const pidFiles = fs.readdirSync(runDir).filter(f => f.endsWith(".pid"));
+            if (pidFiles.length > 0) {
+                for (const pidFile of pidFiles) {
+                    const name = pidFile.replace(".pid", "");
+                    const pidPath = path.join(runDir, pidFile);
+                    try {
+                        const pid = fs.readFileSync(pidPath, "utf-8").trim();
+                        addLine(`Instance: ${name}`, `PID ${pid}`);
+                    } catch {
+                        addLine(`Instance: ${name}`, "(error reading PID)");
+                    }
+                }
+            } else {
+                lines.push("No running instances found");
+            }
+        } else {
+            lines.push("No running instances found");
+        }
+
+        // Recent Logs
+        addSection("RECENT LOGS (last 50 lines)");
+        const logsDir = path.join(os.homedir(), ".opentunnel", "logs");
+        if (fs.existsSync(logsDir)) {
+            const logFiles = fs.readdirSync(logsDir)
+                .filter(f => f.endsWith(".log"))
+                .map(f => ({ name: f, mtime: fs.statSync(path.join(logsDir, f)).mtime }))
+                .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+
+            if (logFiles.length > 0) {
+                const latestLog = logFiles[0];
+                lines.push(`Log file: ${latestLog.name}`);
+                lines.push("-".repeat(40));
+                try {
+                    const logContent = fs.readFileSync(path.join(logsDir, latestLog.name), "utf-8");
+                    const logLines = logContent.split("\n").slice(-50);
+                    lines.push(...logLines);
+                } catch {
+                    lines.push("(error reading log file)");
+                }
+            } else {
+                lines.push("No log files found");
+            }
+        } else {
+            lines.push("No logs directory found");
+        }
+
+        // Environment Variables (relevant ones only)
+        addSection("ENVIRONMENT");
+        const relevantEnvVars = [
+            "OPENTUNNEL_TOKEN",
+            "NGROK_AUTHTOKEN",
+            "CLOUDFLARE_TUNNEL_TOKEN",
+            "TUNNEL_TOKEN",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY"
+        ];
+        for (const envVar of relevantEnvVars) {
+            const value = process.env[envVar];
+            addLine(envVar, value ? "(set)" : "(not set)");
+        }
+
+        // Write report
+        const reportContent = lines.join("\n");
+        const outputFile = options.output;
+
+        fs.writeFileSync(outputFile, reportContent, "utf-8");
+
+        console.log(chalk.green(`\n✓ Diagnostic report generated: ${outputFile}`));
+        console.log(chalk.gray(`\nInclude this file when reporting issues at:`));
+        console.log(chalk.cyan("  https://github.com/anthropics/opentunnel/issues\n"));
     });
 
 program.parse();
